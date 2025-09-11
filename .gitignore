@@ -20,6 +20,9 @@ target/
 *.ipr
 ./http-client.env.json
 ./notes
+http-client.env.json
+notes
+.notes
 
 ### NetBeans ###
 /nbproject/private/

@@ -24,7 +24,7 @@ testCount ?= 10
 processingTimeMillis ?= 80000
 
 remote-test:
-	curl -X POST http://77.234.215.138:34321/run \
+	curl -v -X POST http://77.234.215.138:34321/run \
 		-H "Content-Type: application/json" \
 		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","branch":"$(branch)","accounts":"$(accounts)","ratePerSecond":$(ratePerSecond),"testCount":$(testCount),"processingTimeMillis":$(processingTimeMillis),"onPremises":true}'
 

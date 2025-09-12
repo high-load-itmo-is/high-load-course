@@ -1,6 +1,6 @@
 .PHONY: local-test
 local-test:
-	curl -X POST http://localhost:1234/test/run \
+	curl -v POST http://localhost:1234/test/run \
 		-H "Content-Type: application/json" \
 		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","ratePerSecond":1,"testCount":100,"processingTimeMillis":80000}'
 	curl -X POST http://localhost:1234/test/stop/$(PAYMENT_SERVICE_NAME)
@@ -24,7 +24,7 @@ testCount ?= 10
 processingTimeMillis ?= 80000
 
 remote-test:
-	curl -v -X POST http://77.234.215.138:34321/run \
+	curl -v POST http://77.234.215.138:34321/run \
 		-H "Content-Type: application/json" \
 		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","branch":"$(branch)","accounts":"$(accounts)","ratePerSecond":$(ratePerSecond),"testCount":$(testCount),"processingTimeMillis":$(processingTimeMillis),"onPremises":true}'
 

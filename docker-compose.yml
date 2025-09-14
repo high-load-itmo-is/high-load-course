@@ -56,7 +56,11 @@ services:
       - external_network
     environment:
       - TEST_SERVICE_IP=host.docker.internal
+      # - TOKENS_AUTH_HOSTS=host.docker.internal:8081
       - TOKENS_AUTH_HOSTS=77.234.215.138:34321,host.docker.internal:4321
+      - MANAGEMENT_METRICS_BINDERS_SYSTEM_ENABLED=false
+      - SPRING_AUTOCONFIGURE_EXCLUDE=org.springframework.boot.actuate.autoconfigure.metrics.SystemMetricsAutoConfiguration
+      - LOGGING_LEVEL_COM_ITMO_MICROSERVICES_DEMO_BOMBARDIER_FLOW=OFF
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

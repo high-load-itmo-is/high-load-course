@@ -2,15 +2,25 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.resilience4j.bulkhead.ThreadPoolBulkhead
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadConfig
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadRegistry
+import io.github.resilience4j.decorators.Decorators
+import io.github.resilience4j.ratelimiter.RateLimiterConfig
+import io.github.resilience4j.ratelimiter.RateLimiterRegistry
+import io.github.resilience4j.retry.Retry
+import io.github.resilience4j.retry.RetryConfig
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import ru.quipy.payments.api.PaymentProcessedEvent
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.function.Supplier
 
 
 // Advice: always treat time as a Duration
@@ -34,9 +44,53 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
+    private val rateLimiterRegistry = RateLimiterRegistry.of(
+        RateLimiterConfig.custom()
+            .limitRefreshPeriod(Duration.ofSeconds(1))
+            .limitForPeriod(rateLimitPerSec)
+            .timeoutDuration(requestAverageProcessingTime)
+            .build()
+    )
+
+    private val retry = Retry.of(
+        "payment_request_retry",
+//        RetryConfig.custom<PaymentProcessedEvent>()
+        RetryConfig.custom<Nothing>()
+            .maxAttempts(10000)
+//            .retryOnResult { result -> result.reason == "Request timeout." }
+            .waitDuration(requestAverageProcessingTime)
+            .build()
+    )
+
+    private val rateLimiter = rateLimiterRegistry.rateLimiter("payment_request_limiter")
+
+    private var config = ThreadPoolBulkheadConfig.custom()
+        .maxThreadPoolSize(parallelRequests)
+        .coreThreadPoolSize(parallelRequests)
+        .queueCapacity(1000)
+        .build()
+    private var registry = ThreadPoolBulkheadRegistry.of(config);
+    private var bulkhead = registry.bulkhead("name1")
+
     private val client = OkHttpClient.Builder().build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        val supplier = Supplier<Unit> { performPaymentAsyncImpl(paymentId, amount, paymentStartedAt, deadline) }
+        val decorated = Decorators.ofSupplier(supplier)
+            .withRetry(retry)
+            .withRateLimiter(rateLimiter)
+            .withThreadPoolBulkhead(bulkhead)
+            .decorate()
+        decorated.get()
+    }
+
+    override fun price() = properties.price
+
+    override fun isEnabled() = properties.enabled
+
+    override fun name() = properties.accountName
+
+    private fun performPaymentAsyncImpl(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
@@ -90,12 +144,6 @@ class PaymentExternalSystemAdapterImpl(
             }
         }
     }
-
-    override fun price() = properties.price
-
-    override fun isEnabled() = properties.enabled
-
-    override fun name() = properties.accountName
 
 }
 

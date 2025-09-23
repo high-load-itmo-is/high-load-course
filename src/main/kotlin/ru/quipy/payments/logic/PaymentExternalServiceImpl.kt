@@ -66,10 +66,10 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            rateLimiter.tickBlocking()
             while (!semaphore.tryAcquire()) {
                 Thread.sleep(10)
             }
+            rateLimiter.tickBlocking()
             client.newCall(request).execute().use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)

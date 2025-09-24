@@ -48,7 +48,6 @@ class PaymentExternalSystemAdapterImpl(
         .connectionPool(
             ConnectionPool(parallelRequests, 30, TimeUnit.SECONDS)
         )
-        .dispatcher()
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {

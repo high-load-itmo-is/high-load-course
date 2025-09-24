@@ -45,6 +45,10 @@ class PaymentExternalSystemAdapterImpl(
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .connectionPool(
+            ConnectionPool(parallelRequests, 30, TimeUnit.SECONDS)
+        )
+        .dispatcher()
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -67,7 +71,7 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!semaphore.tryAcquire()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 500 >= deadline) {
+                if (now() + 2 * requestAverageProcessingTime.toMillis() >= deadline) {
                     logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
@@ -77,7 +81,7 @@ class PaymentExternalSystemAdapterImpl(
                 Thread.sleep(10)
             }
             while (!rateLimiter.tick()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 500 >= deadline) {
+                if (now() + 2 * requestAverageProcessingTime.toMillis() >= deadline) {
                     logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")

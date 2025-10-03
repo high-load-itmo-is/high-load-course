@@ -22,17 +22,31 @@ class HttpMetricsFilter(
             filterChain.doFilter(request, response)
         } finally {
             val method = request.method
-            val pattern = (request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE) as? String)
-                ?: request.requestURI
+            val matchedPattern = (request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE) as? String)
+            val uriForLabel = matchedPattern ?: request.requestURI
             val status = response.status.toString()
 
+            // Count all incoming requests (general)
             meterRegistry.counter(
                 "service_incoming_requests_total",
                 "method", method,
-                "uri", pattern,
+                "uri", uriForLabel,
                 "status", status
             ).increment()
+
+            // Count only business incoming requests: mapped app routes excluding actuator and error paths
+            val isBusiness = matchedPattern != null &&
+                    !matchedPattern.startsWith("/actuator") &&
+                    matchedPattern != "/error"
+
+            if (isBusiness) {
+                meterRegistry.counter(
+                    "service_business_incoming_requests_total",
+                    "method", method,
+                    "uri", matchedPattern,
+                    "status", status
+                ).increment()
+            }
         }
     }
 }
-

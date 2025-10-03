@@ -24,7 +24,7 @@ run-local:
 .PHONY: remote-test remote-stop
 
 # Defaults for remote testing (can be overridden on CLI)
-branch ?= hw-2
+branch ?= feature/hw-2
 accounts ?= acc-5
 ratePerSecond ?= 2
 testCount ?= 500

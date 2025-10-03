@@ -82,7 +82,7 @@
               },
               "editorMode": "code",
               "exemplar": true,
-              "expr": "sum(rate(service_business_incoming_requests_total[1m]))",
+              "expr": "sum(rate(service_payments_incoming_requests_total[1m]))",
               "legendFormat": "incoming (business)",
               "range": true,
               "refId": "A"
@@ -813,14 +813,14 @@
               },
               "editorMode": "code",
               "exemplar": true,
-              "expr": "sum by (uri, method) (rate(service_business_incoming_requests_total[1m]))",
+              "expr": "sum(rate(service_payments_incoming_requests_total[1m]))",
               "interval": "",
               "legendFormat": "{{method}} {{uri}}",
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "Business Incoming RPS by route",
+          "title": "Payments Incoming RPS (overall)",
           "type": "timeseries"
         },
         {

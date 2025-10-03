@@ -34,17 +34,15 @@ class HttpMetricsFilter(
                 "status", status
             ).increment()
 
-            // Count only business incoming requests: mapped app routes excluding actuator and error paths
-            val isBusiness = matchedPattern != null &&
+            // Count payments-related incoming requests (overall; no route breakdown)
+            val isPaymentRoute = matchedPattern != null &&
                     !matchedPattern.startsWith("/actuator") &&
-                    matchedPattern != "/error"
+                    matchedPattern != "/error" &&
+                    matchedPattern.contains("/payment")
 
-            if (isBusiness) {
+            if (isPaymentRoute) {
                 meterRegistry.counter(
-                    "service_business_incoming_requests_total",
-                    "method", method,
-                    "uri", matchedPattern,
-                    "status", status
+                    "service_payments_incoming_requests_total"
                 ).increment()
             }
         }

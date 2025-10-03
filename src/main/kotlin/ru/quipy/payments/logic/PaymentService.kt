@@ -35,7 +35,7 @@ data class PaymentAccountProperties(
     val parallelRequests: Int,
     val rateLimitPerSec: Int,
     val price: Int,
-    val averageProcessingTime: Duration = Duration.ofSeconds(11),
+    val averageProcessingTime: Duration = Duration.ofMillis(4900),
     val enabled: Boolean,
 )
 

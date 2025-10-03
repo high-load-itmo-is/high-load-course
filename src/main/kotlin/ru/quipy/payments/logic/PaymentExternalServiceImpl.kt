@@ -5,6 +5,7 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
+import io.micrometer.core.instrument.MeterRegistry
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -20,6 +21,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    private val meterRegistry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
 
     companion object {
@@ -96,6 +98,13 @@ class PaymentExternalSystemAdapterImpl(
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
+                meterRegistry.counter(
+                    "service_outgoing_requests_total",
+                    "target", paymentProviderHostPort,
+                    "account", accountName,
+                    "status", response.code.toString()
+                ).increment()
+
                 // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
                 // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
                 paymentESService.update(paymentId) {
@@ -109,6 +118,13 @@ class PaymentExternalSystemAdapterImpl(
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
                     }
+
+                    meterRegistry.counter(
+                        "service_outgoing_requests_total",
+                        "target", paymentProviderHostPort,
+                        "account", accountName,
+                        "status", "timeout"
+                    ).increment()
                 }
 
                 else -> {
@@ -117,6 +133,13 @@ class PaymentExternalSystemAdapterImpl(
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = e.message)
                     }
+
+                    meterRegistry.counter(
+                        "service_outgoing_requests_total",
+                        "target", paymentProviderHostPort,
+                        "account", accountName,
+                        "status", "exception"
+                    ).increment()
                 }
             }
         } finally {

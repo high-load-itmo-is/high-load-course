@@ -10,13 +10,12 @@ import org.springframework.web.servlet.HandlerMapping
 
 @Component
 class HttpMetricsFilter(
-    private val meterRegistry: MeterRegistry
+    private val meterRegistry: MeterRegistry,
 ) : OncePerRequestFilter() {
-
     override fun doFilterInternal(
         request: HttpServletRequest,
         response: HttpServletResponse,
-        filterChain: FilterChain
+        filterChain: FilterChain,
     ) {
         try {
             filterChain.doFilter(request, response)
@@ -26,24 +25,28 @@ class HttpMetricsFilter(
             val uriForLabel = matchedPattern ?: request.requestURI
             val status = response.status.toString()
 
-            // Count all incoming requests (general)
-            meterRegistry.counter(
-                "service_incoming_requests_total",
-                "method", method,
-                "uri", uriForLabel,
-                "status", status
-            ).increment()
+            meterRegistry
+                .counter(
+                    "service_incoming_requests_total",
+                    "method",
+                    method,
+                    "uri",
+                    uriForLabel,
+                    "status",
+                    status,
+                ).increment()
 
-            // Count payments-related incoming requests (overall; no route breakdown)
-            val isPaymentRoute = matchedPattern != null &&
+            val isPaymentRoute =
+                matchedPattern != null &&
                     !matchedPattern.startsWith("/actuator") &&
                     matchedPattern != "/error" &&
                     matchedPattern.contains("/payment")
 
             if (isPaymentRoute) {
-                meterRegistry.counter(
-                    "service_payments_incoming_requests_total"
-                ).increment()
+                meterRegistry
+                    .counter(
+                        "service_payments_incoming_requests_total",
+                    ).increment()
             }
         }
     }

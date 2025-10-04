@@ -74,17 +74,18 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!semaphore.tryAcquire()) {
+                logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
             if (!rateLimiter.tick()) {
                 logger.info("Throwing 429")
                 val exception = object : ResponseStatusException(
                     HttpStatus.TOO_MANY_REQUESTS,
-                    "Rate limit exceeded. Try again in 5 seconds"
+                    "Rate limit exceeded. Try again in 10 seconds"
                 ) {
                     override fun getHeaders(): HttpHeaders {
                         return HttpHeaders().apply {
-                            add("Retry-After", "5")
+                            add("Retry-After", "10")
                         }
                     }
                 }

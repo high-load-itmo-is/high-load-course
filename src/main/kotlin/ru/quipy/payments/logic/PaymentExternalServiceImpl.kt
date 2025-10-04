@@ -79,9 +79,10 @@ class PaymentExternalSystemAdapterImpl(
             var iter = 0
             while (!rateLimiter.tick()) {
                 if (++iter == 3) {
+                    logger.info("Throwing 429")
                     val exception = object : ResponseStatusException(
                         HttpStatus.TOO_MANY_REQUESTS,
-                        "Rate limit exceeded. Try again in 60 seconds"
+                        "Rate limit exceeded. Try again in 5 seconds"
                     ) {
                         override fun getHeaders(): HttpHeaders {
                             return HttpHeaders().apply {

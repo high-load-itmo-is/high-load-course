@@ -6,6 +6,11 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpStatus
+import org.springframework.web.ErrorResponseException
+import org.springframework.web.client.HttpClientErrorException.TooManyRequests
+import org.springframework.web.server.ResponseStatusException
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -69,22 +74,22 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!semaphore.tryAcquire()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
                 Thread.sleep(10)
             }
+            var iter = 0
             while (!rateLimiter.tick()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
+                if (++iter == 3) {
+                    val exception = object : ResponseStatusException(
+                        HttpStatus.TOO_MANY_REQUESTS,
+                        "Rate limit exceeded. Try again in 60 seconds"
+                    ) {
+                        override fun getHeaders(): HttpHeaders {
+                            return HttpHeaders().apply {
+                                add("Retry-After", "5")
+                            }
+                        }
                     }
-                    return
+                    throw exception
                 }
                 Thread.sleep(10)
             }

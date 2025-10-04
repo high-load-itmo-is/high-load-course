@@ -76,23 +76,19 @@ class PaymentExternalSystemAdapterImpl(
             while (!semaphore.tryAcquire()) {
                 Thread.sleep(10)
             }
-            var iter = 0
-            while (!rateLimiter.tick()) {
-                if (++iter == 3) {
-                    logger.info("Throwing 429")
-                    val exception = object : ResponseStatusException(
-                        HttpStatus.TOO_MANY_REQUESTS,
-                        "Rate limit exceeded. Try again in 5 seconds"
-                    ) {
-                        override fun getHeaders(): HttpHeaders {
-                            return HttpHeaders().apply {
-                                add("Retry-After", "5")
-                            }
+            if (!rateLimiter.tick()) {
+                logger.info("Throwing 429")
+                val exception = object : ResponseStatusException(
+                    HttpStatus.TOO_MANY_REQUESTS,
+                    "Rate limit exceeded. Try again in 5 seconds"
+                ) {
+                    override fun getHeaders(): HttpHeaders {
+                        return HttpHeaders().apply {
+                            add("Retry-After", "5")
                         }
                     }
-                    throw exception
                 }
-                Thread.sleep(10)
+                throw exception
             }
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -119,6 +115,9 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
+                is ResponseStatusException -> {
+                    throw e
+                }
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {

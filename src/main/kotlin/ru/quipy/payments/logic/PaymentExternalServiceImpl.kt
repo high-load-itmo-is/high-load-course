@@ -73,22 +73,27 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
+            val exception = object : ResponseStatusException(
+                HttpStatus.TOO_MANY_REQUESTS,
+                "Rate limit exceeded. Try again in 10 seconds"
+            ) {
+                override fun getHeaders(): HttpHeaders {
+                    return HttpHeaders().apply {
+                        add("Retry-After", "10")
+                    }
+                }
+            }
+
+            if (now() + requestAverageProcessingTime.toMillis() + 100 > deadline) {
+                logger.info("Throwing 429 due to deadline")
+                throw exception
+            }
             while (!semaphore.tryAcquire()) {
                 logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
             if (!rateLimiter.tick()) {
                 logger.info("Throwing 429")
-                val exception = object : ResponseStatusException(
-                    HttpStatus.TOO_MANY_REQUESTS,
-                    "Rate limit exceeded. Try again in 10 seconds"
-                ) {
-                    override fun getHeaders(): HttpHeaders {
-                        return HttpHeaders().apply {
-                            add("Retry-After", "10")
-                        }
-                    }
-                }
                 throw exception
             }
             client.newCall(request).execute().use { response ->

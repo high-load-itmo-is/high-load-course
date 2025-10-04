@@ -84,7 +84,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
 
-            if (now() + requestAverageProcessingTime.toMillis() + 100 > deadline) {
+            if (now() + requestAverageProcessingTime.toMillis() + 500 > deadline) {
                 logger.info("Throwing 429 due to deadline")
                 throw exception
             }

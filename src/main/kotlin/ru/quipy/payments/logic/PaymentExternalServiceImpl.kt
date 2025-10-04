@@ -6,6 +6,8 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.internal.wait
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.ErrorResponseException
@@ -14,10 +16,33 @@ import org.springframework.web.server.ResponseStatusException
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+
+suspend fun Call.await(): Response =
+    suspendCancellableCoroutine { cont ->
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                cont.resume(response)
+            }
+        })
+        cont.invokeOnCancellation {
+            try {
+                cancel()
+            } catch (_: Throwable) {
+            }
+        }
+    }
 
 
 // Advice: always treat time as a Duration
@@ -54,11 +79,10 @@ class PaymentExternalSystemAdapterImpl(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
-
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
         // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
         paymentESService.update(paymentId) {
@@ -73,7 +97,7 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            val exception = object : ResponseStatusException(
+            val tooManyRequests = object : ResponseStatusException(
                 HttpStatus.TOO_MANY_REQUESTS,
                 "Rate limit exceeded. Try again in 10 seconds"
             ) {
@@ -84,19 +108,13 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
 
-            if (now() + requestAverageProcessingTime.toMillis() + 500 > deadline) {
-                logger.info("Throwing 429 due to deadline")
-                throw exception
-            }
-            while (!semaphore.tryAcquire()) {
-                logger.info("Waiting for semaphore")
-                Thread.sleep(10)
-            }
+            semaphore.acquire()
             if (!rateLimiter.tick()) {
                 logger.info("Throwing 429")
-                throw exception
+                throw tooManyRequests
             }
-            client.newCall(request).execute().use { response ->
+            val resp = client.newCall(request).await()
+            resp.use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                 } catch (e: Exception) {

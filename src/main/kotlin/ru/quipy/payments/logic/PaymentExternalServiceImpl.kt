@@ -91,7 +91,8 @@ class PaymentExternalSystemAdapterImpl(
                 logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
-            if (now() + requestAverageProcessingTime.toMillis() + 100 > deadline) {
+            if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
+                logger.info("Preventive exception")
                 throw TooManyRequestsException("Too Many Requests")
             }
             if (!rateLimiter.tick()) {

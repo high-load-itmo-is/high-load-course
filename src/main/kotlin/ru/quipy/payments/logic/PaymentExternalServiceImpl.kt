@@ -6,6 +6,10 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.ControllerAdvice
+import org.springframework.web.bind.annotation.ExceptionHandler
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -13,6 +17,21 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
+
+class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
+
+
+@ControllerAdvice
+class GlobalExceptionHandler {
+
+    @ExceptionHandler(TooManyRequestsException::class)
+    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
+            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
+            .body(ex.message)
+    }
+}
 
 
 // Advice: always treat time as a Duration
@@ -72,9 +91,9 @@ class PaymentExternalSystemAdapterImpl(
                 logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
-            while (!rateLimiter.tick()) {
+            if (!rateLimiter.tick()) {
                 logger.info("Waiting for rps")
-                Thread.sleep(10)
+                throw TooManyRequestsException("Too Many Requests")
             }
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -101,6 +120,7 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
+                is TooManyRequestsException -> throw e
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {

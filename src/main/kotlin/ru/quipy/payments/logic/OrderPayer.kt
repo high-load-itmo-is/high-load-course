@@ -1,5 +1,9 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -26,30 +30,29 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val paymentExecutor = ThreadPoolExecutor(
-        16,
-        16,
-        0L,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(8_000),
-        NamedThreadFactory("payment-submission-executor"),
-        CallerBlockingRejectedExecutionHandler()
-    )
+//    private val paymentExecutor = ThreadPoolExecutor(
+//        16,
+//        16,
+//        0L,
+//        TimeUnit.MILLISECONDS,
+//        LinkedBlockingQueue(8_000),
+//        NamedThreadFactory("payment-submission-executor"),
+//        CallerBlockingRejectedExecutionHandler()
+//    )
+//    private val coroutineScope = CoroutineScope(Dispatchers.IO)
 
-    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
-        paymentExecutor.submit {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
-            }
-            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
-
-            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+        val createdEvent = paymentESService.create {
+            it.create(
+                paymentId,
+                orderId,
+                amount
+            )
         }
+        logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
+
+        paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         return createdAt
     }
 }

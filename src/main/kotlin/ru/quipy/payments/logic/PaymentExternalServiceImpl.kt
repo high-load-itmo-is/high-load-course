@@ -6,14 +6,58 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import kotlinx.coroutines.suspendCancellableCoroutine
+import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.ControllerAdvice
+import org.springframework.web.bind.annotation.ExceptionHandler
+import org.springframework.web.bind.annotation.ResponseStatus
+import org.springframework.web.server.ResponseStatusException
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
+class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
+
+
+@ControllerAdvice
+class GlobalExceptionHandler {
+
+    @ExceptionHandler(TooManyRequestsException::class)
+    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
+            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
+            .body(ex.message)
+    }
+}
+
+suspend fun Call.await(): Response =
+    suspendCancellableCoroutine { cont ->
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                cont.resume(response)
+            }
+        })
+        cont.invokeOnCancellation {
+            try {
+                cancel()
+            } catch (_: Throwable) {
+            }
+        }
+    }
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -49,7 +93,7 @@ class PaymentExternalSystemAdapterImpl(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
@@ -68,27 +112,12 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            while (!semaphore.tryAcquire()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
-                Thread.sleep(10)
+            semaphore.acquire()
+            if (!rateLimiter.tick()) {
+                throw TooManyRequestsException("Too Many Requests")
             }
-            while (!rateLimiter.tick()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
-                Thread.sleep(10)
-            }
-            client.newCall(request).execute().use { response ->
+            val resp = client.newCall(request).await()
+            resp.use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                 } catch (e: Exception) {
@@ -113,6 +142,7 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
+                is TooManyRequestsException -> throw e
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {

@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.ControllerAdvice
 import org.springframework.web.bind.annotation.ExceptionHandler
+import org.springframework.web.server.ResponseStatusException
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -18,20 +19,20 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
-class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
-
-
-@ControllerAdvice
-class GlobalExceptionHandler {
-
-    @ExceptionHandler(TooManyRequestsException::class)
-    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
-        return ResponseEntity
-            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
-            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
-            .body(ex.message)
-    }
-}
+//class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
+//
+//
+//@ControllerAdvice
+//class GlobalExceptionHandler {
+//
+//    @ExceptionHandler(TooManyRequestsException::class)
+//    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+//        return ResponseEntity
+//            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
+//            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
+//            .body(ex.message)
+//    }
+//}
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -62,9 +63,9 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests);
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.MINUTES)
+        .readTimeout(30, TimeUnit.MINUTES)
+        .writeTimeout(30, TimeUnit.MINUTES)
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -91,11 +92,11 @@ class PaymentExternalSystemAdapterImpl(
                 Thread.sleep(10)
             }
             if (now() + requestAverageProcessingTime.toMillis() > deadline) {
-                throw TooManyRequestsException("Too many requests")
+                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
             }
             if (!rateLimiter.tick()) {
                 logger.info("Back pressure")
-                throw TooManyRequestsException("Too Many Requests")
+                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
             }
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -122,7 +123,7 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
-                is TooManyRequestsException -> throw e
+                is ResponseStatusException -> throw e
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {

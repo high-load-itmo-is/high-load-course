@@ -6,6 +6,10 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.ControllerAdvice
+import org.springframework.web.bind.annotation.ExceptionHandler
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -14,6 +18,20 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
+class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
+
+
+@ControllerAdvice
+class GlobalExceptionHandler {
+
+    @ExceptionHandler(TooManyRequestsException::class)
+    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
+            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
+            .body(ex.message)
+    }
+}
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -69,24 +87,15 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!semaphore.tryAcquire()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
+                logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
-            while (!rateLimiter.tick()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
-                Thread.sleep(10)
+            if (now() + requestAverageProcessingTime.toMillis() > deadline) {
+                throw TooManyRequestsException("Too many requests")
+            }
+            if (!rateLimiter.tick()) {
+                logger.info("Back pressure")
+                throw TooManyRequestsException("Too Many Requests")
             }
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -113,6 +122,7 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
+                is TooManyRequestsException -> throw e
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {

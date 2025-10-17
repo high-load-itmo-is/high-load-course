@@ -5,12 +5,14 @@ Content-Type: application/json
 {
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
-  "ratePerSecond": 2,
-  "testCount": 500,
-  "processingTimeMillis": 60000
+  "ratePerSecond": 16,
+  "testCount": 1600,
+  "processingTimeMillis": 30000,
+  "maxRetries": 3,
+  "retryCodes": [429],
+  "timeout": "30s"
 }
 
 ### Stop running test to save time and resources
 # @timeout 120
-
 POST http://localhost:1234/test/stop/{{serviceName}}

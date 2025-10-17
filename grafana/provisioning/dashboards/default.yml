@@ -4,7 +4,6 @@ providers:
   - name: Default # A uniquely identifiable name for the provider
     folder: bombardier # The folder where to place the dashboards
     type: file
-    updateIntervalSeconds: 10
     options:
-      # Path must be a directory containing dashboard JSON files
-      path: /etc/grafana/provisioning/dashboards
+      path:
+        /etc/grafana/provisioning/dashboards/ServicesStatistic.json

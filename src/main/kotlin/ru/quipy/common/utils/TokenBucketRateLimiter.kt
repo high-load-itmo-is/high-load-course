@@ -23,8 +23,8 @@ class TokenBucketRateLimiter(
     private val rateLimiterScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
 
     private var bucket: AtomicInteger = AtomicInteger(0)
-    private var start = System.currentTimeMillis()
-    private var nextExpectedWakeUp = start + timeUnit.toMillis(window)
+    @Volatile private var start = System.currentTimeMillis()
+    @Volatile private var nextExpectedWakeUp = start + timeUnit.toMillis(window)
 
     private val releaseJob = rateLimiterScope.launch {
         while (true) {
@@ -49,5 +49,12 @@ class TokenBucketRateLimiter(
                 return true
             }
         }
+    }
+
+    fun estimateWaitTimeMillis(): Long {
+        val tokensAvailable = bucket.get()
+        if (tokensAvailable > 0) return 0
+        val wait = nextExpectedWakeUp - System.currentTimeMillis()
+        return if (wait > 0) wait else 0
     }
 }

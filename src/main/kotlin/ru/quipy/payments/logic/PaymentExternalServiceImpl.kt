@@ -19,20 +19,21 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
-//class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
-//
-//
-//@ControllerAdvice
-//class GlobalExceptionHandler {
-//
-//    @ExceptionHandler(TooManyRequestsException::class)
-//    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
-//        return ResponseEntity
-//            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
-//            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
-//            .body(ex.message)
-//    }
-//}
+class TooManyRequestsException(
+    val retryAfterSeconds: Long = 1L,
+    message: String = "Too Many Requests",
+) : RuntimeException(message)
+
+@ControllerAdvice
+class GlobalExceptionHandler {
+    @ExceptionHandler(TooManyRequestsException::class)
+    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS)
+            .header("Retry-After", ex.retryAfterSeconds.toString())
+            .body(ex.message)
+    }
+}
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(

@@ -19,20 +19,21 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
-//class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
-//
-//
-//@ControllerAdvice
-//class GlobalExceptionHandler {
-//
-//    @ExceptionHandler(TooManyRequestsException::class)
-//    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
-//        return ResponseEntity
-//            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
-//            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
-//            .body(ex.message)
-//    }
-//}
+class TooManyRequestsException(
+    val retryAfterSeconds: Long = 1L,
+    message: String = "Too Many Requests",
+) : RuntimeException(message)
+
+@ControllerAdvice
+class GlobalExceptionHandler {
+    @ExceptionHandler(TooManyRequestsException::class)
+    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS)
+            .header("Retry-After", ex.retryAfterSeconds.toString())
+            .body(ex.message)
+    }
+}
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -87,16 +88,37 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            while (!semaphore.tryAcquire()) {
-                logger.info("Waiting for semaphore")
-                Thread.sleep(10)
+            val avgProcMs = requestAverageProcessingTime.toMillis()
+            // Quick budget check before any waiting
+            var nowTs = now()
+            var timeBudget = deadline - nowTs - avgProcMs
+            if (timeBudget <= 0) {
+                throw TooManyRequestsException(1L, "Too many payment requests")
             }
-            if (now() + requestAverageProcessingTime.toMillis() > deadline) {
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
+
+            // Try to acquire concurrency permit, but respect deadline budget
+            var acquired = semaphore.tryAcquire()
+            while (!acquired) {
+                Thread.sleep(5)
+                nowTs = now()
+                timeBudget = deadline - nowTs - avgProcMs
+                if (timeBudget <= 0) {
+                    throw TooManyRequestsException(1L, "Too many payment requests")
+                }
+                acquired = semaphore.tryAcquire()
             }
-            if (!rateLimiter.tick()) {
-                logger.info("Back pressure")
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
+
+            // Smooth outbound RPS: wait for a rate-limiter slot up to the remaining budget
+            var allowed = rateLimiter.tick()
+            while (!allowed) {
+                Thread.sleep(5)
+                nowTs = now()
+                timeBudget = deadline - nowTs - avgProcMs
+                if (timeBudget <= 0) {
+                    logger.info("Back pressure deadline reached")
+                    throw TooManyRequestsException(1L, "Too many payment requests")
+                }
+                allowed = rateLimiter.tick()
             }
             client.newCall(request).execute().use { response ->
                 val body = try {

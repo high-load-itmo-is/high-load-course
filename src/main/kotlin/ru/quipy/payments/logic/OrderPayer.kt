@@ -47,8 +47,19 @@ class OrderPayer {
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         }
 
-        // This will throw ExecutionException if the task failed
-        future.get() // Or future.get(timeout, TimeUnit.MILLISECONDS)
+        // Propagate specific HTTP errors (e.g., 429) to the caller instead of masking with 500
+        try {
+            future.get() // Or future.get(timeout, TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.ExecutionException) {
+            val cause = e.cause
+            if (cause is org.springframework.web.server.ResponseStatusException) {
+                throw cause
+            }
+            if (cause is TooManyRequestsException) {
+                throw cause
+            }
+            throw e
+        }
 
         return createdAt
     }

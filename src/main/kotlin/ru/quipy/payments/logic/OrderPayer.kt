@@ -6,15 +6,14 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
-import ru.quipy.common.utils.TokenBucketRateLimiter
-import ru.quipy.common.web.TooManyRequestsException
+import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.payments.logic.TooManyRequestsException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeUnit.SECONDS
 
 @Service
 class OrderPayer {
@@ -29,11 +28,9 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val ingressRateLimiter = TokenBucketRateLimiter(
-        rate = 11,           
-        bucketMaxCapacity = 16,
-        window = 1,
-        timeUnit = SECONDS,
+    private val ingressRateLimiter = SlidingWindowRateLimiter(
+        rate = 11L,
+        window = java.time.Duration.ofSeconds(1)
     )
 
     private val paymentExecutor = ThreadPoolExecutor(
@@ -49,7 +46,8 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (!ingressRateLimiter.tick()) {
             val waitMs = ingressRateLimiter.estimateWaitTimeMillis()
-            throw TooManyRequestsException(retryAfterMillis = waitMs)
+            val seconds = kotlin.math.max(1L, kotlin.math.ceil(waitMs / 1000.0).toLong())
+            throw TooManyRequestsException(retryAfterSeconds = seconds)
         }
 
         val createdAt = System.currentTimeMillis()

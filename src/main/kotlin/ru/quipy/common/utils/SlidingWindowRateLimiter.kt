@@ -64,6 +64,12 @@ class SlidingWindowRateLimiter(
             queue.take()
         }
     }.invokeOnCompletion { th -> if (th != null) logger.error("Rate limiter release job completed", th) }
+
+    fun estimateWaitTimeMillis(): Long {
+        val head = queue.peek() ?: return 0
+        val wait = window.toMillis() - (System.currentTimeMillis() - head.timestamp)
+        return if (wait > 0) wait else 0
+    }
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(SlidingWindowRateLimiter::class.java)
     }

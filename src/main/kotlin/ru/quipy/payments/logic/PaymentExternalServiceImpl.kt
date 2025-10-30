@@ -89,20 +89,9 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            // Acquire permit without busy-wait; bound wait time so we don't exceed deadline
-            val avgMs = requestAverageProcessingTime.toMillis()
-            val waitBudgetMs = (deadline - now() - avgMs).coerceAtLeast(0)
-            acquiredPermit = semaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS)
-            if (!acquiredPermit) {
-                throw TooManyRequestsException(retryAfterSeconds = 1)
-            }
-
-            // Recheck time budget after acquiring a permit
-            if (now() + avgMs > deadline) {
-                semaphore.release()
-                acquiredPermit = false
-                throw TooManyRequestsException(retryAfterSeconds = 1)
-            }
+            // Acquire permit (blocking) — keeps concurrency bounded without spin/log spam
+            semaphore.acquire()
+            acquiredPermit = true
 
             // Respect egress rate limit; provide Retry-After aligned with next token
             if (!rateLimiter.tick()) {

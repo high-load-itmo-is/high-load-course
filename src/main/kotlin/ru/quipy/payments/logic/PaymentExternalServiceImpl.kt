@@ -2,7 +2,7 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import kotlinx.coroutines.sync.Semaphore
+import java.util.concurrent.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry

@@ -82,22 +82,36 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
+        var acquiredPermit = false
         try {
             val request = Request.Builder().run {
                 url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
                 post(emptyBody)
             }.build()
 
-            while (!semaphore.tryAcquire()) {
-                logger.info("Waiting for semaphore")
-                Thread.sleep(10)
+            // Acquire permit without busy-wait; bound wait time so we don't exceed deadline
+            val avgMs = requestAverageProcessingTime.toMillis()
+            val waitBudgetMs = (deadline - now() - avgMs).coerceAtLeast(0)
+            acquiredPermit = semaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS)
+            if (!acquiredPermit) {
+                throw TooManyRequestsException(retryAfterSeconds = 1)
             }
-            if (now() + requestAverageProcessingTime.toMillis() > deadline) {
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
+
+            // Recheck time budget after acquiring a permit
+            if (now() + avgMs > deadline) {
+                semaphore.release()
+                acquiredPermit = false
+                throw TooManyRequestsException(retryAfterSeconds = 1)
             }
+
+            // Respect egress rate limit; provide Retry-After aligned with next token
             if (!rateLimiter.tick()) {
                 logger.info("Back pressure")
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
+                val retryAfterMs = rateLimiter.estimateWaitTimeMillis()
+                val seconds = maxOf(1L, kotlin.math.ceil(retryAfterMs / 1000.0).toLong())
+                semaphore.release()
+                acquiredPermit = false
+                throw TooManyRequestsException(retryAfterSeconds = seconds)
             }
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -155,7 +169,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
         } finally {
-            semaphore.release()
+            if (acquiredPermit) semaphore.release()
         }
     }
 

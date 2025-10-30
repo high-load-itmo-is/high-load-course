@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.payments.logic.TooManyRequestsException
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
@@ -27,6 +28,12 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    // Ingress Sliding Window limiter per test: shape/deny early
+    private val ingressRateLimiter = SlidingWindowRateLimiter(
+        rate = 11L,
+        window = java.time.Duration.ofSeconds(1)
+    )
+
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
@@ -38,6 +45,13 @@ class OrderPayer {
     )
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        // Reject early if ingress window is full; inform client when to retry
+        if (!ingressRateLimiter.tick()) {
+            val waitMs = ingressRateLimiter.estimateWaitTimeMillis()
+            val seconds = kotlin.math.max(1L, kotlin.math.ceil(waitMs / 1000.0).toLong())
+            throw TooManyRequestsException(retryAfterSeconds = seconds)
+        }
+
         val createdAt = System.currentTimeMillis()
         val future = paymentExecutor.submit {
             val createdEvent = paymentESService.create {

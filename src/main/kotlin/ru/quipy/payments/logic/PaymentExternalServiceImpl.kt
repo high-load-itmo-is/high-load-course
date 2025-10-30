@@ -67,6 +67,11 @@ class PaymentExternalSystemAdapterImpl(
         .connectTimeout(30, TimeUnit.MINUTES)
         .readTimeout(30, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.MINUTES)
+        .dispatcher(Dispatcher().apply {
+            // Lift per-host concurrency limits for async calls
+            maxRequests = 256
+            maxRequestsPerHost = 256
+        })
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -97,8 +102,11 @@ class PaymentExternalSystemAdapterImpl(
             throw TooManyRequestsException(retryAfterSeconds = seconds)
         }
 
-        // Send asynchronously to free executor threads immediately
-        client.newCall(request).enqueue(object : Callback {
+        val call = client.newCall(request)
+        // Optional per-call timeout budget; keep generous to avoid premature timeouts
+        // call.timeout().timeout(30, TimeUnit.SECONDS)
+
+        call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) {
                 logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
@@ -141,6 +149,40 @@ class PaymentExternalSystemAdapterImpl(
                 semaphore.release()
             }
         })
+
+    } catch (e: Exception) {
+            when (e) {
+                is TooManyRequestsException -> throw e
+                is SocketTimeoutException -> {
+                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                    }
+
+                    meterRegistry.counter(
+                        "service_outgoing_requests_total",
+                        "target", paymentProviderHostPort,
+                        "account", accountName,
+                        "status", "timeout"
+                    ).increment()
+                }
+
+                else -> {
+                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+
+                    meterRegistry.counter(
+                        "service_outgoing_requests_total",
+                        "target", paymentProviderHostPort,
+                        "account", accountName,
+                        "status", "exception"
+                    ).increment()
+                }
+            }
+        }
     }
 
     override fun price() = properties.price

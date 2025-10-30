@@ -11,7 +11,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.ControllerAdvice
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.server.ResponseStatusException
-import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.TokenBucketRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -56,9 +56,16 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter = SlidingWindowRateLimiter(
-        rateLimitPerSec.toLong(),
-        Duration.ofSeconds(1)
+    private val acquirePollIntervalMs = 5L
+    private val ratePollIntervalMs = 5L
+    private val minBudgetMsForAttempt = 200L
+    private val safetyMarginMs = 50L
+
+    private val rateLimiter = TokenBucketRateLimiter(
+        rate = rateLimitPerSec,
+        bucketMaxCapacity = maxOf(rateLimitPerSec, parallelRequests / 2),
+        window = 1,
+        timeUnit = TimeUnit.SECONDS
     )
     private val semaphore = Semaphore(parallelRequests);
 
@@ -71,65 +78,125 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
-        val transactionId = UUID.randomUUID()
-
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
-
-        logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
+        fun remaining(): Long = deadline - now()
 
         try {
-            val request = Request.Builder().run {
-                url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                post(emptyBody)
-            }.build()
-
-            while (!semaphore.tryAcquire()) {
-                logger.info("Waiting for semaphore")
-                Thread.sleep(10)
-            }
-            if (now() + requestAverageProcessingTime.toMillis() > deadline) {
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
-            }
-            if (!rateLimiter.tick()) {
-                logger.info("Back pressure")
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
-            }
-            client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(),false, e.message)
+            while (true) {
+                if (remaining() <= minBudgetMsForAttempt) {
+                    val tx = UUID.randomUUID()
+                    paymentESService.update(paymentId) {
+                        it.logSubmission(false, tx, now(), Duration.ofMillis(now() - paymentStartedAt))
+                        it.logProcessing(false, now(), tx, reason = "Insufficient time budget before call")
+                    }
+                    return
                 }
 
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                meterRegistry.counter(
-                    "service_outgoing_requests_total",
-                    "target", paymentProviderHostPort,
-                    "account", accountName,
-                    "status", response.code.toString()
-                ).increment()
-
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                val transactionId = UUID.randomUUID()
                 paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    it.logSubmission(true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                }
+
+                var acquired = false
+                try {
+                    while (!semaphore.tryAcquire()) {
+                        if (remaining() <= minBudgetMsForAttempt) {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = "Insufficient time budget in queue")
+                            }
+                            return
+                        }
+                        Thread.sleep(acquirePollIntervalMs)
+                    }
+                    acquired = true
+
+                    while (!rateLimiter.tick()) {
+                        if (remaining() <= minBudgetMsForAttempt) {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = "Insufficient time budget due to rate limiting")
+                            }
+                            return
+                        }
+                        Thread.sleep(ratePollIntervalMs)
+                    }
+
+                    val timeBudgetMs = remaining() - safetyMarginMs
+                    if (timeBudgetMs <= 0) {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = "No time budget after acquiring permit")
+                        }
+                        return
+                    }
+
+                    val request = Request.Builder().run {
+                        url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+                        post(emptyBody)
+                    }.build()
+
+                    val callClient = client.newBuilder()
+                        .callTimeout(timeBudgetMs, TimeUnit.MILLISECONDS)
+                        .readTimeout(timeBudgetMs, TimeUnit.MILLISECONDS)
+                        .writeTimeout(timeBudgetMs, TimeUnit.MILLISECONDS)
+                        .connectTimeout(minOf(timeBudgetMs, 1000L).toInt().toLong(), TimeUnit.MILLISECONDS)
+                        .build()
+
+                    try {
+                        callClient.newCall(request).execute().use { response ->
+                            val status = response.code
+                            val body = try {
+                                mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                            } catch (e: Exception) {
+                                logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                            }
+
+                            logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+
+                            meterRegistry.counter(
+                                "service_outgoing_requests_total",
+                                "target", paymentProviderHostPort,
+                                "account", accountName,
+                                "status", status.toString()
+                            ).increment()
+
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                            }
+
+                            if (status == 200 && body.result) {
+                                return
+                            }
+
+                            val retryable = (status == 200 && !body.result) || status == 429 || status in 500..599
+                            if (!retryable) {
+                                return
+                            }
+                            if (status == 429) {
+                                Thread.sleep(ratePollIntervalMs * 10)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] Call exception for txId: $transactionId, payment: $paymentId", e)
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = e.message)
+                        }
+                        meterRegistry.counter(
+                            "service_outgoing_requests_total",
+                            "target", paymentProviderHostPort,
+                            "account", accountName,
+                            "status", "exception"
+                        ).increment()
+                    }
+                } finally {
+                    if (acquired) semaphore.release()
                 }
             }
         } catch (e: Exception) {
             when (e) {
-                is ResponseStatusException -> throw e
+                is ResponseStatusException -> {
+                    return
+                }
                 is SocketTimeoutException -> {
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
-
+                    logger.error("[$accountName] Payment timeout for payment: $paymentId", e)
                     meterRegistry.counter(
                         "service_outgoing_requests_total",
                         "target", paymentProviderHostPort,
@@ -137,14 +204,8 @@ class PaymentExternalSystemAdapterImpl(
                         "status", "timeout"
                     ).increment()
                 }
-
                 else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
-
+                    logger.error("[$accountName] Payment failed for payment: $paymentId", e)
                     meterRegistry.counter(
                         "service_outgoing_requests_total",
                         "target", paymentProviderHostPort,
@@ -153,8 +214,6 @@ class PaymentExternalSystemAdapterImpl(
                     ).increment()
                 }
             }
-        } finally {
-            semaphore.release()
         }
     }
 

@@ -47,7 +47,6 @@ class OrderPayer {
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         }
 
-        // This will throw ExecutionException if the task failed
         future.get() // Or future.get(timeout, TimeUnit.MILLISECONDS)
 
         return createdAt

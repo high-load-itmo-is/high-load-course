@@ -74,92 +74,73 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+        // Mark submission for the tester in all cases
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
-        var acquiredPermit = false
-        try {
-            val request = Request.Builder().run {
-                url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                post(emptyBody)
-            }.build()
+        val request = Request.Builder().run {
+            url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            post(emptyBody)
+        }.build()
 
-            // Acquire permit (blocking) — keeps concurrency bounded without spin/log spam
-            semaphore.acquire()
-            acquiredPermit = true
+        // Acquire permit (blocking) to bound concurrency
+        semaphore.acquire()
 
-            // Respect egress rate limit; provide Retry-After aligned with next token
-            if (!rateLimiter.tick()) {
-                logger.info("Back pressure")
-                val retryAfterMs = rateLimiter.estimateWaitTimeMillis()
-                val seconds = maxOf(1L, kotlin.math.ceil(retryAfterMs / 1000.0).toLong())
-                semaphore.release()
-                acquiredPermit = false
-                throw TooManyRequestsException(retryAfterSeconds = seconds)
-            }
-            client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(),false, e.message)
+        // Enforce egress rate; if rejected, release and advise Retry-After
+        if (!rateLimiter.tick()) {
+            val retryAfterMs = rateLimiter.estimateWaitTimeMillis()
+            val seconds = maxOf(1L, kotlin.math.ceil(retryAfterMs / 1000.0).toLong())
+            semaphore.release()
+            throw TooManyRequestsException(retryAfterSeconds = seconds)
+        }
+
+        // Send asynchronously to free executor threads immediately
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = e.message)
                 }
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                 meterRegistry.counter(
                     "service_outgoing_requests_total",
                     "target", paymentProviderHostPort,
                     "account", accountName,
-                    "status", response.code.toString()
+                    "status", "exception"
                 ).increment()
 
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
+                semaphore.release()
             }
-        } catch (e: Exception) {
-            when (e) {
-                is ResponseStatusException -> throw e
-                is SocketTimeoutException -> {
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val body = try {
+                        mapper.readValue(resp.body?.string(), ExternalSysResponse::class.java)
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${resp.code}, reason: ${resp.body?.string()}")
+                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
+
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                     meterRegistry.counter(
                         "service_outgoing_requests_total",
                         "target", paymentProviderHostPort,
                         "account", accountName,
-                        "status", "timeout"
+                        "status", resp.code.toString()
                     ).increment()
-                }
-
-                else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
                     paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
                     }
-
-                    meterRegistry.counter(
-                        "service_outgoing_requests_total",
-                        "target", paymentProviderHostPort,
-                        "account", accountName,
-                        "status", "exception"
-                    ).increment()
                 }
+                semaphore.release()
             }
-        } finally {
-            if (acquiredPermit) semaphore.release()
-        }
+        })
     }
 
     override fun price() = properties.price

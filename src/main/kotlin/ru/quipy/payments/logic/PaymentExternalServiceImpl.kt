@@ -19,22 +19,6 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
-//class TooManyRequestsException(message: String = "Too Many Requests") : RuntimeException(message)
-//
-//
-//@ControllerAdvice
-//class GlobalExceptionHandler {
-//
-//    @ExceptionHandler(TooManyRequestsException::class)
-//    fun handleTooManyRequestsException(ex: TooManyRequestsException): ResponseEntity<String> {
-//        return ResponseEntity
-//            .status(HttpStatus.TOO_MANY_REQUESTS) // HTTP 429
-//            .header("Retry-After", "10") // Опционально: заголовок для указания времени ожидания
-//            .body(ex.message)
-//    }
-//}
-
-// Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
@@ -91,13 +75,7 @@ class PaymentExternalSystemAdapterImpl(
                 logger.info("Waiting for semaphore")
                 Thread.sleep(10)
             }
-            if (now() + requestAverageProcessingTime.toMillis() > deadline) {
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
-            }
-            if (!rateLimiter.tick()) {
-                logger.info("Back pressure")
-                throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
-            }
+            rateLimiter.tickBlocking()
             client.newCall(request).execute().use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -163,6 +141,12 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
+
+    override fun parallelRequests() = properties.parallelRequests
+
+    override fun rateLimitPerSec() = properties.rateLimitPerSec
+
+    override fun averageProcessingTime() = properties.averageProcessingTime
 
 }
 

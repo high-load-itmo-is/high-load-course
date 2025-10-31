@@ -6,7 +6,7 @@ import java.util.concurrent.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
-import ru.quipy.common.utils.TokenBucketRateLimiter
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.web.TooManyRequestsException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -36,11 +36,10 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter = TokenBucketRateLimiter(
-        rate = rateLimitPerSec,
-        bucketMaxCapacity = rateLimitPerSec,
-        window = 1,
-        timeUnit = TimeUnit.SECONDS,
+    private val rateLimiter = LeakingBucketRateLimiter(
+        rate = rateLimitPerSec.toLong(),
+        window = Duration.ofSeconds(1),
+        bucketSize = rateLimitPerSec,
     )
     private val semaphore = Semaphore(parallelRequests)
 

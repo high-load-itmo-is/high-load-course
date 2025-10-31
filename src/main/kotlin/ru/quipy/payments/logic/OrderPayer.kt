@@ -6,12 +6,15 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
+import ru.quipy.common.utils.TokenBucketRateLimiter
+import ru.quipy.common.web.TooManyRequestsException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeUnit.SECONDS
 
 @Service
 class OrderPayer {
@@ -26,6 +29,13 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    private val ingressRateLimiter = TokenBucketRateLimiter(
+        rate = 11,           
+        bucketMaxCapacity = 16,
+        window = 1,
+        timeUnit = SECONDS,
+    )
+
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
@@ -37,19 +47,23 @@ class OrderPayer {
     )
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        if (!ingressRateLimiter.tick()) {
+            val waitMs = ingressRateLimiter.estimateWaitTimeMillis()
+            throw TooManyRequestsException(retryAfterMillis = waitMs)
+        }
+
         val createdAt = System.currentTimeMillis()
-        paymentExecutor.submit {
+        val future = paymentExecutor.submit {
             val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
+                it.create(paymentId, orderId, amount)
             }
             logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         }
+
+        future.get() // Or future.get(timeout, TimeUnit.MILLISECONDS)
+
         return createdAt
     }
 }

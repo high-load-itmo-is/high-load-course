@@ -38,7 +38,9 @@ class OrderPayer {
 
     fun calculateMaxQueueSize(): Int {
         val calculatedSize = (1000 / requestAverageProcessingTime.toMillis() * parallelRequests).toInt()
-        return minOf(rateLimitPerSec, calculatedSize)
+        val minSize = minOf(rateLimitPerSec, calculatedSize)
+        logger.info("Max queue size: $minSize")
+        return minSize
     }
 
     private val rejectedExecutionHandler = RejectedExecutionHandler { _, _ ->

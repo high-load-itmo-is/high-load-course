@@ -56,7 +56,6 @@ class PaymentExternalSystemAdapterImpl(
         // First attempt transaction
         var transactionId = UUID.randomUUID()
 
-        // Always mark that submission happened for test harness
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
@@ -127,7 +126,8 @@ class PaymentExternalSystemAdapterImpl(
                             "status", response.code.toString()
                         ).increment()
 
-                        // Update processing state for this attempt
+                        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+                        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования
                         paymentESService.update(paymentId) {
                             it.logProcessing(body.result, now(), txId, reason = body.message)
                         }
@@ -141,7 +141,7 @@ class PaymentExternalSystemAdapterImpl(
                 // If failed, try one more time if budget allows
                 val canRetry = !body.result && (now() + estimatedProcMs) < deadline
                 if (canRetry) {
-                    // small jittered backoff
+                    // small backoff
                     val backoffMs = 100L
                     Thread.sleep(minOf(backoffMs, maxOf(0L, deadline - now() - estimatedProcMs)))
 

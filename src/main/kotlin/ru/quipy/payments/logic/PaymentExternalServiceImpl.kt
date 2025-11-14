@@ -66,25 +66,10 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!semaphore.tryAcquire()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
                 Thread.sleep(10)
             }
-            while (!rateLimiter.tick()) {
-                if (now() + requestAverageProcessingTime.toMillis() + 10 >= deadline) {
-                    logger.warn("[$accountName] Skipping request due to deadline for payment $paymentId")
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request deadline for payment $paymentId.")
-                    }
-                    return
-                }
-                Thread.sleep(10)
-            }
+            rateLimiter.tickBlocking()
+
             client.newCall(request).execute().use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)

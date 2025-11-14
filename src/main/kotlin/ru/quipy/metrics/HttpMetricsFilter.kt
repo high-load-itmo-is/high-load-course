@@ -1,6 +1,7 @@
 package ru.quipy.metrics
 
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
@@ -17,6 +18,7 @@ class HttpMetricsFilter(
         response: HttpServletResponse,
         filterChain: FilterChain,
     ) {
+        val startNs = System.nanoTime()
         try {
             filterChain.doFilter(request, response)
         } finally {
@@ -48,6 +50,18 @@ class HttpMetricsFilter(
                         "service_payments_incoming_requests_total",
                     ).increment()
             }
+
+            val duration = System.nanoTime() - startNs
+            Timer
+                .builder("service_http_request_duration_seconds")
+                .tags(
+                    "method", method,
+                    "uri", uriForLabel,
+                    "status", status,
+                )
+                .publishPercentiles(0.9, 0.95, 0.99)
+                .register(meterRegistry)
+                .record(java.time.Duration.ofNanos(duration))
         }
     }
 }

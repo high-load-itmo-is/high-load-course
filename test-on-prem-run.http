@@ -8,9 +8,9 @@ Content-Type: application/json
   "token": "{{token}}",
   "branch": "hw-4-alternative",
   "accounts": "acc-23",
-  "ratePerSecond": 16,
-  "testCount": 1600,
-  "processingTimeMillis": 30000
+  "ratePerSecond": 15,
+  "testCount": 3000,
+  "processingTimeMillis": 2500
 }
 
 ### Stop running test to save credits

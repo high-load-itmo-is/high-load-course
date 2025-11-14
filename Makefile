@@ -1,30 +1,40 @@
-.PHONY: local-test
-local-test:
-	curl -v POST http://localhost:1234/test/run \
-		-H "Content-Type: application/json" \
-		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","ratePerSecond":1,"testCount":100,"processingTimeMillis":80000}'
-	curl -X POST http://localhost:1234/test/stop/$(PAYMENT_SERVICE_NAME)
-
-.PHONY: infra run
+.PHONY: infra run logs
 
 infra:
 	docker compose -f docker-compose.yml up
+
+logs:
+	docker compose logs --tail=400 -f $(CONTAINER)
 
 run:
 	mvn spring-boot:run
 
 
+.PHONY: run-local
+run-local:
+	PAYMENT_SERVICE_NAME=$(serviceName) PAYMENT_TOKEN=$(token) mvn spring-boot:run
+
+
 .PHONY: remote-test remote-stop
 
 # Defaults for remote testing (can be overridden on CLI)
-branch ?= main
-accounts ?= acc-12,acc-20
-ratePerSecond ?= 2
-testCount ?= 10
-processingTimeMillis ?= 80000
+branch ?= hw-6
+# accounts ?= acc-7
+# ratePerSecond ?= 5
+# testCount ?= 1000 
+# processingTimeMillis ?= 6000 
+accounts ?= acc-8
+ratePerSecond ?= 7
+testCount ?= 800 
+processingTimeMillis ?= 3500 
+
+local-test:
+	curl -v -X POST http://localhost:1234/test/run \
+		-H "Content-Type: application/json" \
+		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","ratePerSecond":$(ratePerSecond),"testCount":$(testCount),"processingTimeMillis":$(processingTimeMillis),"maxRetries":3,"retryCodes":[429],"timeout":"30s"}'
 
 remote-test:
-	curl -v POST http://77.234.215.138:34321/run \
+	curl -v -X POST http://77.234.215.138:34321/run \
 		-H "Content-Type: application/json" \
 		-d '{"serviceName":"$(PAYMENT_SERVICE_NAME)","token":"$(PAYMENT_TOKEN)","branch":"$(branch)","accounts":"$(accounts)","ratePerSecond":$(ratePerSecond),"testCount":$(testCount),"processingTimeMillis":$(processingTimeMillis),"onPremises":true}'
 

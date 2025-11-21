@@ -37,3 +37,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### My ###
+grafana/

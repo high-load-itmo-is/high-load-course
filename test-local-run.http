@@ -5,9 +5,9 @@ Content-Type: application/json
 {
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
-  "ratePerSecond": 16,
-  "testCount": 1600,
-  "processingTimeMillis": 30000,
+  "ratePerSecond": 5,
+  "testCount": 1000,
+  "processingTimeMillis": 6000,
   "maxRetries": 3,
   "retryCodes": [429],
   "timeout": "30s"

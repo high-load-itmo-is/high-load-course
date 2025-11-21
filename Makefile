@@ -18,15 +18,11 @@ run-local:
 .PHONY: remote-test remote-stop
 
 # Defaults for remote testing (can be overridden on CLI)
-branch ?= hw-6
-# accounts ?= acc-7
-# ratePerSecond ?= 5
-# testCount ?= 1000 
-# processingTimeMillis ?= 6000 
-accounts ?= acc-8
-ratePerSecond ?= 7
-testCount ?= 800 
-processingTimeMillis ?= 3500 
+branch ?= hw-7
+accounts ?= acc-7
+ratePerSecond ?= 5
+testCount ?= 1000
+processingTimeMillis ?= 6000
 
 local-test:
 	curl -v -X POST http://localhost:1234/test/run \

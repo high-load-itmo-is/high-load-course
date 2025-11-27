@@ -76,7 +76,7 @@ class APIController {
     private val rateLimiter = LeakingBucketRateLimiter(
         11,
         Duration.ofSeconds(1),
-        24
+        120
     )
 
     @PostMapping("/orders/{orderId}/payment")

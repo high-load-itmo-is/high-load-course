@@ -36,6 +36,8 @@ data class PaymentAccountProperties(
     val rateLimitPerSec: Int,
     val price: Int,
     val averageProcessingTime: Duration = Duration.ofMillis(4900),
+    // Optional per-account client-side timeout (ms) for calls to provider
+    val clientTimeoutMs: Long? = null,
     val enabled: Boolean,
 )
 

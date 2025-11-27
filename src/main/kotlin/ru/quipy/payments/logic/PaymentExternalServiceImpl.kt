@@ -47,7 +47,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val rateLimiter = TokenBucketRateLimiter(
         rate = rateLimitPerSec,
-        bucketMaxCapacity = maxOf(rateLimitPerSec, parallelRequests / 2),
+        bucketMaxCapacity = rateLimitPerSec,
         window = 1,
         timeUnit = TimeUnit.SECONDS
     )
@@ -148,8 +148,9 @@ class PaymentExternalSystemAdapterImpl(
                         return
                     }
 
+                    val effectiveTimeoutMs = properties.clientTimeoutMs?.let { minOf(timeBudgetMs, it) } ?: timeBudgetMs
                     val request = buildRequest(txId)
-                    val callClient = buildCallClient(timeBudgetMs)
+                    val callClient = buildCallClient(effectiveTimeoutMs)
 
                     var callStartNs = 0L
                     try {
@@ -179,6 +180,8 @@ class PaymentExternalSystemAdapterImpl(
 
                             incMetric(statusCode.toString())
                             markProcessed(body.result, txId, body.message)
+
+                            
 
                             if (statusCode == 200 && body.result) {
                                 // Track at which retry the payment finally succeeded

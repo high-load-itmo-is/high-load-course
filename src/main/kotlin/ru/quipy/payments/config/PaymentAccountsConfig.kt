@@ -36,6 +36,9 @@ class PaymentAccountsConfig {
     @Value("#{'\${payment.accounts}'.split(',')}")
     lateinit var allowedAccounts: List<String>
 
+    @Value("\${payment.client-timeout-ms:#{null}}")
+    var clientTimeoutMs: Long? = null
+
     @Bean
     fun accountAdapters(
         paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
@@ -54,7 +57,7 @@ class PaymentAccountsConfig {
             mapper.typeFactory.constructCollectionType(List::class.java, PaymentAccountProperties::class.java)
         )
             .filter { it.accountName in allowedAccounts }
-            .map { it.copy(enabled = true) }
+            .map { it.copy(enabled = true, clientTimeoutMs = clientTimeoutMs) }
             .onEach(::println)
             .map {
                 PaymentExternalSystemAdapterImpl(

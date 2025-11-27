@@ -42,7 +42,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val acquirePollIntervalMs = 5L
     private val ratePollIntervalMs = 5L
-    private val minBudgetMsForAttempt = 200L
+    private val minBudgetMsForAttempt = 2000L
     private val safetyMarginMs = 2000L
 
     private val rateLimiter = TokenBucketRateLimiter(
@@ -207,7 +207,10 @@ class PaymentExternalSystemAdapterImpl(
                                 "cause", cause
                             ).increment()
 
-                            if (statusCode == 429) Thread.sleep(ratePollIntervalMs * 10)
+                            if (statusCode == 429) {
+                                logger.warn("[$accountName] Payment got 429 for txId: $txId, payment: $paymentId")
+                                Thread.sleep(ratePollIntervalMs * 10)
+                            }
                         }
                     } catch (e: Exception) {
                         logger.error("[$accountName] Call exception for txId: $txId, payment: $paymentId", e)

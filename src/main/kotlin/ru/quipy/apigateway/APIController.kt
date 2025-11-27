@@ -3,6 +3,7 @@ package ru.quipy.apigateway
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.server.ResponseStatusException
@@ -12,6 +13,19 @@ import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
 import java.time.Duration
 import java.util.*
+
+class TooManyPaymentRequestsException(
+    private val retryAfterSeconds: Long
+) : ResponseStatusException(
+    HttpStatus.TOO_MANY_REQUESTS,
+    "Too many payment requests"
+) {
+    override fun getResponseHeaders(): HttpHeaders {
+        val headers = HttpHeaders()
+        headers.add(HttpHeaders.RETRY_AFTER, retryAfterSeconds.toString())
+        return headers
+    }
+}
 
 @RestController
 class APIController {
@@ -62,15 +76,14 @@ class APIController {
     private val rateLimiter = LeakingBucketRateLimiter(
         11,
         Duration.ofSeconds(1),
-        24
+        16
     )
 
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
-//        if (!rateLimiter.tick()) {
-//            logger.info("Throwing 429")
-//            throw ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many payment requests")
-//        }
+        if (!rateLimiter.tick()) {
+            throw TooManyPaymentRequestsException(30)
+        }
 
         val paymentId = UUID.randomUUID()
         val order = orderRepository.findById(orderId)?.let {

@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.server.ResponseStatusException
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
@@ -58,9 +59,10 @@ class APIController {
         PAID,
     }
 
-    private val rateLimiter = SlidingWindowRateLimiter(
+    private val rateLimiter = LeakingBucketRateLimiter(
         11,
-        Duration.ofSeconds(1)
+        Duration.ofSeconds(1),
+        11
     )
 
     @PostMapping("/orders/{orderId}/payment")

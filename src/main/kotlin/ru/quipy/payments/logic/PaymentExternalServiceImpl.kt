@@ -43,7 +43,7 @@ class PaymentExternalSystemAdapterImpl(
     private val acquirePollIntervalMs = 5L
     private val ratePollIntervalMs = 5L
     private val minBudgetMsForAttempt = 200L
-    private val safetyMarginMs = 50L
+    private val safetyMarginMs = 1300L
 
     private val rateLimiter = TokenBucketRateLimiter(
         rate = rateLimitPerSec,

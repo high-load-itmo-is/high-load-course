@@ -43,7 +43,7 @@ class PaymentExternalSystemAdapterImpl(
     private val acquirePollIntervalMs = 5L
     private val ratePollIntervalMs = 5L
     private val minBudgetMsForAttempt = 200L
-    private val safetyMarginMs = 1300L
+    private val safetyMarginMs = 2000L
 
     private val rateLimiter = TokenBucketRateLimiter(
         rate = rateLimitPerSec,
@@ -54,9 +54,9 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests);
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.MINUTES)
-        .readTimeout(30, TimeUnit.MINUTES)
-        .writeTimeout(30, TimeUnit.MINUTES)
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .writeTimeout(2, TimeUnit.SECONDS)
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {

@@ -6,16 +6,17 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
 
-// Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
@@ -44,6 +45,7 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests);
 
     private val client = OkHttpClient.Builder()
+        .callTimeout(Duration.ofMillis(1100))
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -51,8 +53,6 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
@@ -62,8 +62,6 @@ class PaymentExternalSystemAdapterImpl(
         try {
             val result = executePaymentWithRetry(paymentId, amount, transactionId, maxAttempts = 3)
 
-            // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-            // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
             paymentESService.update(paymentId) {
                 it.logProcessing(result.success, now(), transactionId, reason = result.message)
             }
@@ -126,7 +124,13 @@ class PaymentExternalSystemAdapterImpl(
             try {
                 rateLimiter.tickBlocking()
 
+                // Start measuring request time
+                val startTime = System.nanoTime()
+
                 client.newCall(request).execute().use { response ->
+                    // Calculate request duration
+                    val duration = System.nanoTime() - startTime
+
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                     } catch (e: Exception) {
@@ -135,6 +139,17 @@ class PaymentExternalSystemAdapterImpl(
                     }
 
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, attempt: $attempt")
+
+                    // Record request latency
+                    Timer.builder("payment_request_latency_seconds")
+                        .description("Payment request latency")
+                        .tags("target", paymentProviderHostPort,
+                              "account", accountName,
+                              "status_code", response.code.toString(),
+                              "result", body.result.toString())
+                        .publishPercentileHistogram()
+                        .register(meterRegistry)
+                        .record(duration, TimeUnit.NANOSECONDS)
 
                     meterRegistry.counter(
                         "service_outgoing_requests_total",
@@ -145,8 +160,13 @@ class PaymentExternalSystemAdapterImpl(
 
                     lastResult = PaymentResult(body.result, body.message)
 
-                    // If successful, return immediately
+                    // If successful, return immediately and record retries
                     if (body.result) {
+                        // Record number of retries (attempts - 1)
+                        val retryCount = attempt - 1
+                        if (retryCount > 0) {
+                            recordRetries(retryCount, "success")
+                        }
                         return lastResult!!
                     }
 
@@ -155,13 +175,51 @@ class PaymentExternalSystemAdapterImpl(
                         logger.warn("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId. Retrying...")
                     }
                 }
+            } catch (e: Exception) {
+                when (e) {
+                    is InterruptedIOException -> {
+                        if (attempt < maxAttempts) {
+                            logger.warn("[$accountName] Payment request had timeout for txId: $transactionId, payment: $paymentId. Retrying...")
+                        }
+                    }
+                    else -> {
+                        throw e
+                    }
+                }
             } finally {
                 semaphore.release()
             }
         }
 
+        // All attempts exhausted - record retries for failed payment
+        val retryCount = attempt - 1
+        if (retryCount > 0) {
+            recordRetries(retryCount, "failed")
+        }
+
         // Return the last result after all attempts
         return lastResult ?: PaymentResult(false, "All retry attempts failed")
+    }
+
+    private fun recordRetries(retryCount: Int, outcome: String) {
+        // Counter for total number of retries
+        meterRegistry.counter(
+            "payment_retries_total",
+            "target", paymentProviderHostPort,
+            "account", accountName,
+            "outcome", outcome
+        ).increment(retryCount.toDouble())
+
+        // Counter for payments that needed retries
+        meterRegistry.counter(
+            "payment_requests_with_retries_total",
+            "target", paymentProviderHostPort,
+            "account", accountName,
+            "outcome", outcome,
+            "retry_count", retryCount.toString()
+        ).increment()
+
+        logger.info("[$accountName] Recorded $retryCount retries with outcome: $outcome")
     }
 
     override fun price() = properties.price

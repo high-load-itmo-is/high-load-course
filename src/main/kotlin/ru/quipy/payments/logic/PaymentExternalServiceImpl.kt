@@ -10,6 +10,7 @@ import io.micrometer.core.instrument.Timer
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -44,6 +45,7 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests);
 
     private val client = OkHttpClient.Builder()
+        .callTimeout(Duration.ofMillis(1100))
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -171,6 +173,17 @@ class PaymentExternalSystemAdapterImpl(
                     // If failed and we have more attempts, continue to retry
                     if (attempt < maxAttempts) {
                         logger.warn("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId. Retrying...")
+                    }
+                }
+            } catch (e: Exception) {
+                when (e) {
+                    is InterruptedIOException -> {
+                        if (attempt < maxAttempts) {
+                            logger.warn("[$accountName] Payment request had timeout for txId: $transactionId, payment: $paymentId. Retrying...")
+                        }
+                    }
+                    else -> {
+                        throw e
                     }
                 }
             } finally {

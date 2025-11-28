@@ -1,4 +1,4 @@
-### Run test remotely
+### Run test remotel
 # @timeout 120
 POST http://77.234.215.138:34321/run
 Content-Type: application/json

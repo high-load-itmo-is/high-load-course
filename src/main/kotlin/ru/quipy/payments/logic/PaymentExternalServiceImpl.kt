@@ -60,7 +60,7 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
         try {
-            val result = executePaymentWithRetry(paymentId, amount, transactionId, maxAttempts = 2)
+            val result = executePaymentWithRetry(paymentId, amount, transactionId, maxAttempts = 3)
 
             // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
             // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)

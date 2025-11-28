@@ -158,10 +158,17 @@ class PaymentExternalSystemAdapterImpl(
 
                     lastResult = PaymentResult(body.result, body.message)
 
+                    // If successful, return immediately and record retries
                     if (body.result) {
+                        // Record number of retries (attempts - 1)
+                        val retryCount = attempt - 1
+                        if (retryCount > 0) {
+                            recordRetries(retryCount, "success")
+                        }
                         return lastResult!!
                     }
 
+                    // If failed and we have more attempts, continue to retry
                     if (attempt < maxAttempts) {
                         logger.warn("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId. Retrying...")
                     }
@@ -171,7 +178,35 @@ class PaymentExternalSystemAdapterImpl(
             }
         }
 
+        // All attempts exhausted - record retries for failed payment
+        val retryCount = attempt - 1
+        if (retryCount > 0) {
+            recordRetries(retryCount, "failed")
+        }
+
+        // Return the last result after all attempts
         return lastResult ?: PaymentResult(false, "All retry attempts failed")
+    }
+
+    private fun recordRetries(retryCount: Int, outcome: String) {
+        // Counter for total number of retries
+        meterRegistry.counter(
+            "payment_retries_total",
+            "target", paymentProviderHostPort,
+            "account", accountName,
+            "outcome", outcome
+        ).increment(retryCount.toDouble())
+
+        // Counter for payments that needed retries
+        meterRegistry.counter(
+            "payment_requests_with_retries_total",
+            "target", paymentProviderHostPort,
+            "account", accountName,
+            "outcome", outcome,
+            "retry_count", retryCount.toString()
+        ).increment()
+
+        logger.info("[$accountName] Recorded $retryCount retries with outcome: $outcome")
     }
 
     override fun price() = properties.price

@@ -59,7 +59,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder()
         .dispatcher(dispatcher)
-        .callTimeout(Duration.ofMillis(10000))
+        .callTimeout(Duration.ofMillis(20000))
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {

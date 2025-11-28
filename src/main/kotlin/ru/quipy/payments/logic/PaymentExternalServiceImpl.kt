@@ -138,14 +138,14 @@ class PaymentExternalSystemAdapterImpl(
 
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, attempt: $attempt")
 
-                    // Record request latency with quantiles
-                    Timer.builder("payment_request_latency")
-                        .description("Payment request latency in milliseconds")
-                        .tag("target", paymentProviderHostPort)
-                        .tag("account", accountName)
-                        .tag("status_code", response.code.toString())
-                        .tag("result", body.result.toString())
-                        .publishPercentiles(0.5, 0.8, 0.95, 0.99) // p50, p80, p95, p99
+                    // Record request latency
+                    Timer.builder("payment_request_latency_seconds")
+                        .description("Payment request latency")
+                        .tags("target", paymentProviderHostPort,
+                              "account", accountName,
+                              "status_code", response.code.toString(),
+                              "result", body.result.toString())
+                        .publishPercentileHistogram()
                         .register(meterRegistry)
                         .record(duration, TimeUnit.NANOSECONDS)
 

@@ -73,10 +73,9 @@ class APIController {
         PAID,
     }
 
-    private val rateLimiter = LeakingBucketRateLimiter(
-        11,
-        Duration.ofSeconds(1),
-        400
+    private val rateLimiter = SlidingWindowRateLimiter(
+        10,
+        Duration.ofSeconds(1)
     )
 
     @PostMapping("/orders/{orderId}/payment")

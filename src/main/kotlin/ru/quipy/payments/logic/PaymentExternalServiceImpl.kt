@@ -45,7 +45,7 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests);
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(Duration.ofMillis(1100))
+        .callTimeout(Duration.ofMillis(10000))
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {

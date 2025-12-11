@@ -6,7 +6,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
-import io.micrometer.core.instrument.Timer
 import io.netty.channel.ChannelOption
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
@@ -19,7 +18,6 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 
@@ -58,6 +56,25 @@ class PaymentExternalSystemAdapterImpl(
     )
     private val semaphore = Semaphore(parallelRequests)
     
+    private val successCounter = meterRegistry.counter(
+        "service_outgoing_requests_total", 
+        "target", paymentProviderHostPort, 
+        "account", accountName, 
+        "status", "200"
+    )
+    private val timeoutCounter = meterRegistry.counter(
+        "service_outgoing_requests_total",
+        "target", paymentProviderHostPort,
+        "account", accountName,
+        "status", "timeout"
+    )
+    private val errorCounter = meterRegistry.counter(
+        "service_outgoing_requests_total",
+        "target", paymentProviderHostPort,
+        "account", accountName,
+        "status", "exception"
+    )
+    
     init {
         logger.warn("[$accountName] Initialized with rateLimitPerSec=$rateLimitPerSec, parallelRequests=$parallelRequests")
     }
@@ -86,20 +103,19 @@ class PaymentExternalSystemAdapterImpl(
     private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
         if (!semaphore.tryAcquire()) {
             GlobalScope.launch(Dispatchers.Default) {
-                delay(5)
+                delay(1)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
         }
         if (!rateLimiter.tick()) {
+            semaphore.release()
             GlobalScope.launch(Dispatchers.Default) {
-                delay(5)
+                delay(1)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
         }
-
-        val startTime = System.nanoTime()
 
         webClient.post()
             .uri { uriBuilder ->
@@ -117,8 +133,6 @@ class PaymentExternalSystemAdapterImpl(
             .doFinally { semaphore.release() }
             .subscribe(
                 { responseBody ->
-                    val duration = System.nanoTime() - startTime
-                    
                     val body = try {
                         mapper.readValue(responseBody, ExternalSysResponse::class.java)
                     } catch (e: Exception) {
@@ -126,15 +140,11 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}")
+                    if (logger.isDebugEnabled) {
+                        logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
+                    }
 
-                    Timer.builder("payment_request_latency_seconds")
-                        .tags("target", paymentProviderHostPort, "account", accountName, "status_code", "200", "result", body.result.toString())
-                        .publishPercentileHistogram()
-                        .register(meterRegistry)
-                        .record(duration, TimeUnit.NANOSECONDS)
-
-                    meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", "200").increment()
+                    successCounter.increment()
 
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
@@ -149,12 +159,10 @@ class PaymentExternalSystemAdapterImpl(
                 { error ->
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", error)
 
-                    val status = when (error) {
-                        is TimeoutException, is SocketTimeoutException -> "timeout"
-                        else -> "exception"
+                    when (error) {
+                        is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
+                        else -> errorCounter.increment()
                     }
-                    
-                    meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", status).increment()
 
                     GlobalScope.launch(Dispatchers.IO) {
                         try {

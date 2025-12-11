@@ -13,12 +13,14 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.client.HttpClient
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
@@ -34,6 +36,13 @@ class PaymentExternalSystemAdapterImpl(
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
+        
+        // Shared dispatcher for blocking DB operations - much larger than default Dispatchers.IO (64 threads)
+        // This allows handling many concurrent blocking ES operations
+        val blockingDispatcher = Executors.newFixedThreadPool(
+            500,
+            NamedThreadFactory("es-blocking")
+        ).asCoroutineDispatcher()
     }
 
     private val serviceName = properties.serviceName
@@ -59,9 +68,9 @@ class PaymentExternalSystemAdapterImpl(
         )
         .build()
 
-    // Coroutine scope for async operations
+    // Coroutine scope for async operations - uses default dispatcher, blocking calls use blockingDispatcher
     private val paymentScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO + CoroutineName("payment-$accountName")
+        SupervisorJob() + Dispatchers.Default + CoroutineName("payment-$accountName")
     )
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -69,26 +78,33 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
-
-        logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
-
-        // Launch async coroutine - truly non-blocking
+        // Launch async coroutine - truly non-blocking, returns IMMEDIATELY
         paymentScope.launch {
             try {
+                // Move ALL blocking ES operations inside the coroutine with dedicated dispatcher
+                withContext(blockingDispatcher) {
+                    paymentESService.update(paymentId) {
+                        it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                    }
+                }
+
+                logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
+
                 val result = executePaymentWithRetry(paymentId, amount, transactionId, maxAttempts = 3)
 
-                paymentESService.update(paymentId) {
-                    it.logProcessing(result.success, now(), transactionId, reason = result.message)
+                withContext(blockingDispatcher) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(result.success, now(), transactionId, reason = result.message)
+                    }
                 }
             } catch (e: Exception) {
                 when (e) {
                     is TimeoutException, is SocketTimeoutException -> {
                         logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                        withContext(blockingDispatcher) {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                            }
                         }
 
                         meterRegistry.counter(
@@ -102,8 +118,10 @@ class PaymentExternalSystemAdapterImpl(
                     else -> {
                         logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = e.message)
+                        withContext(blockingDispatcher) {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = e.message)
+                            }
                         }
 
                         meterRegistry.counter(

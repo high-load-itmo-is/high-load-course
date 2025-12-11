@@ -22,10 +22,10 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    // Coroutine scope for async payment processing - much more efficient than thread pool
-    // SupervisorJob ensures that failure of one coroutine doesn't cancel others
+    // Coroutine scope for async payment processing
+    // Uses Default dispatcher - blocking calls will use the shared blockingDispatcher
     private val paymentScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO + CoroutineName("order-payer")
+        SupervisorJob() + Dispatchers.Default + CoroutineName("order-payer")
     )
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
@@ -34,12 +34,15 @@ class OrderPayer {
         // Launch async coroutine - doesn't block, returns immediately
         paymentScope.launch {
             try {
-                val createdEvent = paymentESService.create {
-                    it.create(
-                        paymentId,
-                        orderId,
-                        amount
-                    )
+                // Use the shared blocking dispatcher for ES operations
+                val createdEvent = withContext(PaymentExternalSystemAdapterImpl.blockingDispatcher) {
+                    paymentESService.create {
+                        it.create(
+                            paymentId,
+                            orderId,
+                            amount
+                        )
+                    }
                 }
                 logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 

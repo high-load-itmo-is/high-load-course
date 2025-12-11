@@ -3,9 +3,7 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import kotlinx.coroutines.*
-import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
@@ -75,25 +73,27 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        // Log submission synchronously (fire and forget the ES update)
-        try {
-            paymentESService.update(paymentId) {
-                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        // Fire and forget ES update - don't block the hot path
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                paymentESService.update(paymentId) {
+                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                }
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
             }
-        } catch (e: Exception) {
-            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
 
-        // Execute payment asynchronously - use reactive chain, no coroutines blocking
+        // Execute payment asynchronously - fire immediately
         executePaymentReactive(paymentId, amount, transactionId)
     }
 
     private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
         // First check rate limiter - this is fast
         if (!rateLimiter.tick()) {
-            // Schedule retry with delay if rate limited
+            // Schedule retry with minimal delay if rate limited
             GlobalScope.launch(Dispatchers.Default) {
-                delay(10)
+                delay(5)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
@@ -101,9 +101,9 @@ class PaymentExternalSystemAdapterImpl(
 
         // Try to acquire semaphore permit
         if (!semaphore.tryAcquire()) {
-            // Schedule retry with delay if no permits
+            // Schedule retry with minimal delay if no permits
             GlobalScope.launch(Dispatchers.Default) {
-                delay(10)
+                delay(5)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
@@ -125,10 +125,9 @@ class PaymentExternalSystemAdapterImpl(
             }
             .retrieve()
             .bodyToMono<String>()
-            .doFinally { semaphore.release() }  // Always release semaphore
+            .doFinally { semaphore.release() }
             .subscribe(
                 { responseBody ->
-                    // Success callback - runs on Netty event loop, non-blocking
                     val duration = System.nanoTime() - startTime
                     
                     val body = try {
@@ -149,7 +148,7 @@ class PaymentExternalSystemAdapterImpl(
 
                     meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", "200").increment()
 
-                    // Log result asynchronously - don't block the event loop
+                    // Log result asynchronously
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
                             paymentESService.update(paymentId) {
@@ -161,7 +160,6 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 },
                 { error ->
-                    // Error callback
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", error)
 
                     val status = when (error) {
@@ -171,7 +169,6 @@ class PaymentExternalSystemAdapterImpl(
                     
                     meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", status).increment()
 
-                    // Log failure asynchronously
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
                             paymentESService.update(paymentId) {

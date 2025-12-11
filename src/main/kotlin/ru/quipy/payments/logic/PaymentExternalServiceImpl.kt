@@ -9,18 +9,18 @@ import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import io.netty.channel.ChannelOption
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.client.HttpClient
-import ru.quipy.common.utils.NamedThreadFactory
+import reactor.netty.resources.ConnectionProvider
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
@@ -37,17 +37,22 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
         
-        // Shared dispatcher for blocking DB operations - much larger than default Dispatchers.IO (64 threads)
-        // This allows handling many concurrent blocking ES operations
-        val blockingDispatcher = Executors.newFixedThreadPool(
-            500,
-            NamedThreadFactory("es-blocking")
-        ).asCoroutineDispatcher()
+        // Connection provider configured for massive concurrency
+        val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
+            .maxConnections(100_000)
+            .pendingAcquireMaxCount(100_000)
+            .pendingAcquireTimeout(Duration.ofSeconds(120))
+            .maxIdleTime(Duration.ofSeconds(60))
+            .build()
+        
+        // Shared HttpClient - truly non-blocking with Netty event loop
+        val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
+            .responseTimeout(Duration.ofMillis(120000))
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
     }
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
@@ -56,225 +61,128 @@ class PaymentExternalSystemAdapterImpl(
         Duration.ofSeconds(1)
     )
     private val semaphore = Semaphore(parallelRequests)
-
-    // Async WebClient with Netty - non-blocking HTTP client
-    private val webClient: WebClient = WebClient.builder()
-        .baseUrl("http://$paymentProviderHostPort")
-        .clientConnector(
-            ReactorClientHttpConnector(
-                HttpClient.create()
-                    .responseTimeout(Duration.ofMillis(120000))
-            )
-        )
-        .build()
-
-    // Coroutine scope for async operations - uses default dispatcher, blocking calls use blockingDispatcher
-    private val paymentScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default + CoroutineName("payment-$accountName")
-    )
-
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        logger.warn("[$accountName] Submitting payment request for payment $paymentId")
-
-        val transactionId = UUID.randomUUID()
-
-        // Launch async coroutine - truly non-blocking, returns IMMEDIATELY
-        paymentScope.launch {
-            try {
-                // Move ALL blocking ES operations inside the coroutine with dedicated dispatcher
-                withContext(blockingDispatcher) {
-                    paymentESService.update(paymentId) {
-                        it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                    }
-                }
-
-                logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
-
-                val result = executePaymentWithRetry(paymentId, amount, transactionId, maxAttempts = 3)
-
-                withContext(blockingDispatcher) {
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(result.success, now(), transactionId, reason = result.message)
-                    }
-                }
-            } catch (e: Exception) {
-                when (e) {
-                    is TimeoutException, is SocketTimeoutException -> {
-                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                        withContext(blockingDispatcher) {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                            }
-                        }
-
-                        meterRegistry.counter(
-                            "service_outgoing_requests_total",
-                            "target", paymentProviderHostPort,
-                            "account", accountName,
-                            "status", "timeout"
-                        ).increment()
-                    }
-
-                    else -> {
-                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-                        withContext(blockingDispatcher) {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = e.message)
-                            }
-                        }
-
-                        meterRegistry.counter(
-                            "service_outgoing_requests_total",
-                            "target", paymentProviderHostPort,
-                            "account", accountName,
-                            "status", "exception"
-                        ).increment()
-                    }
-                }
-            }
-        }
+    
+    init {
+        logger.warn("[$accountName] Initialized with rateLimitPerSec=$rateLimitPerSec, parallelRequests=$parallelRequests")
     }
 
-    private suspend fun executePaymentWithRetry(
-        paymentId: UUID,
-        amount: Int,
-        transactionId: UUID,
-        maxAttempts: Int
-    ): PaymentResult {
-        var attempt = 0
-        var lastResult: PaymentResult? = null
+    // WebClient - truly non-blocking, uses Netty event loop (not threads)
+    private val webClient: WebClient = WebClient.builder()
+        .baseUrl("http://$paymentProviderHostPort")
+        .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
+        .build()
 
-        while (attempt < maxAttempts) {
-            attempt++
-            logger.info("[$accountName] Attempt $attempt/$maxAttempts for payment $paymentId, txId: $transactionId")
+    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        val transactionId = UUID.randomUUID()
 
-            // Acquire semaphore permit - suspending, non-blocking
-            semaphore.withPermit {
-                // Wait for rate limiter - suspending version
-                tickBlockingSuspend()
+        // Log submission synchronously (fire and forget the ES update)
+        try {
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+            }
+        } catch (e: Exception) {
+            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+        }
 
-                try {
-                    // Start measuring request time
-                    val startTime = System.nanoTime()
+        // Execute payment asynchronously - use reactive chain, no coroutines blocking
+        executePaymentReactive(paymentId, amount, transactionId)
+    }
 
-                    // Async HTTP call using WebClient
-                    val responseBody = webClient.post()
-                        .uri { uriBuilder ->
-                            uriBuilder.path("/external/process")
-                                .queryParam("serviceName", serviceName)
-                                .queryParam("token", token)
-                                .queryParam("accountName", accountName)
-                                .queryParam("transactionId", transactionId)
-                                .queryParam("paymentId", paymentId)
-                                .queryParam("amount", amount)
-                                .build()
-                        }
-                        .retrieve()
-                        .bodyToMono<String>()
-                        .awaitSingle()
+    private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
+        // First check rate limiter - this is fast
+        if (!rateLimiter.tick()) {
+            // Schedule retry with delay if rate limited
+            GlobalScope.launch(Dispatchers.Default) {
+                delay(10)
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
+            return
+        }
 
-                    // Calculate request duration
+        // Try to acquire semaphore permit
+        if (!semaphore.tryAcquire()) {
+            // Schedule retry with delay if no permits
+            GlobalScope.launch(Dispatchers.Default) {
+                delay(10)
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
+            return
+        }
+
+        // We have rate limit token and semaphore permit - make the HTTP call
+        val startTime = System.nanoTime()
+
+        webClient.post()
+            .uri { uriBuilder ->
+                uriBuilder.path("/external/process")
+                    .queryParam("serviceName", serviceName)
+                    .queryParam("token", token)
+                    .queryParam("accountName", accountName)
+                    .queryParam("transactionId", transactionId)
+                    .queryParam("paymentId", paymentId)
+                    .queryParam("amount", amount)
+                    .build()
+            }
+            .retrieve()
+            .bodyToMono<String>()
+            .doFinally { semaphore.release() }  // Always release semaphore
+            .subscribe(
+                { responseBody ->
+                    // Success callback - runs on Netty event loop, non-blocking
                     val duration = System.nanoTime() - startTime
-
+                    
                     val body = try {
                         mapper.readValue(responseBody, ExternalSysResponse::class.java)
                     } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, reason: $responseBody")
+                        logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, attempt: $attempt")
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}")
 
-                    // Record request latency
+                    // Record metrics
                     Timer.builder("payment_request_latency_seconds")
-                        .description("Payment request latency")
-                        .tags(
-                            "target", paymentProviderHostPort,
-                            "account", accountName,
-                            "status_code", "200",
-                            "result", body.result.toString()
-                        )
+                        .tags("target", paymentProviderHostPort, "account", accountName, "status_code", "200", "result", body.result.toString())
                         .publishPercentileHistogram()
                         .register(meterRegistry)
                         .record(duration, TimeUnit.NANOSECONDS)
 
-                    meterRegistry.counter(
-                        "service_outgoing_requests_total",
-                        "target", paymentProviderHostPort,
-                        "account", accountName,
-                        "status", "200"
-                    ).increment()
+                    meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", "200").increment()
 
-                    lastResult = PaymentResult(body.result, body.message)
-
-                    // If successful, return immediately and record retries
-                    if (body.result) {
-                        // Record number of retries (attempts - 1)
-                        val retryCount = attempt - 1
-                        if (retryCount > 0) {
-                            recordRetries(retryCount, "success")
-                        }
-                        return lastResult!!
-                    }
-
-                    // If failed and we have more attempts, continue to retry
-                    if (attempt < maxAttempts) {
-                        logger.warn("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId. Retrying...")
-                    }
-                } catch (e: Exception) {
-                    when {
-                        e is TimeoutException || e.cause is TimeoutException -> {
-                            if (attempt < maxAttempts) {
-                                logger.warn("[$accountName] Payment request had timeout for txId: $transactionId, payment: $paymentId. Retrying...")
-                            } else {
-                                throw e
+                    // Log result asynchronously - don't block the event loop
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
                             }
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
                         }
-                        else -> {
-                            throw e
+                    }
+                },
+                { error ->
+                    // Error callback
+                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", error)
+
+                    val status = when (error) {
+                        is TimeoutException, is SocketTimeoutException -> "timeout"
+                        else -> "exception"
+                    }
+                    
+                    meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", status).increment()
+
+                    // Log failure asynchronously
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(false, now(), transactionId, reason = error.message)
+                            }
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] Failed to log failure for payment $paymentId", e)
                         }
                     }
                 }
-            }
-        }
-
-        // All attempts exhausted - record retries for failed payment
-        val retryCount = attempt - 1
-        if (retryCount > 0) {
-            recordRetries(retryCount, "failed")
-        }
-
-        // Return the last result after all attempts
-        return lastResult ?: PaymentResult(false, "All retry attempts failed")
-    }
-
-    // Suspending version of tickBlocking - doesn't block threads
-    private suspend fun tickBlockingSuspend() {
-        while (!rateLimiter.tick()) {
-            delay(10)
-        }
-    }
-
-    private fun recordRetries(retryCount: Int, outcome: String) {
-        // Counter for total number of retries
-        meterRegistry.counter(
-            "payment_retries_total",
-            "target", paymentProviderHostPort,
-            "account", accountName,
-            "outcome", outcome
-        ).increment(retryCount.toDouble())
-
-        // Counter for payments that needed retries
-        meterRegistry.counter(
-            "payment_requests_with_retries_total",
-            "target", paymentProviderHostPort,
-            "account", accountName,
-            "outcome", outcome,
-            "retry_count", retryCount.toString()
-        ).increment()
-
-        logger.info("[$accountName] Recorded $retryCount retries with outcome: $outcome")
+            )
     }
 
     override fun price() = properties.price
@@ -282,7 +190,6 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
-
 }
 
 data class PaymentResult(val success: Boolean, val message: String?)

@@ -27,7 +27,6 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
         
-        // Fire and forget ES create - don't block the controller thread
         GlobalScope.launch(Dispatchers.IO) {
             try {
                 paymentESService.create {
@@ -39,7 +38,6 @@ class OrderPayer {
             }
         }
 
-        // Submit to payment service immediately - don't wait for ES create
         paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         
         return createdAt

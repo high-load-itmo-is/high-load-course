@@ -35,7 +35,6 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
         
-        // Connection provider configured for massive concurrency
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
             .maxConnections(100_000)
             .pendingAcquireMaxCount(100_000)
@@ -43,7 +42,6 @@ class PaymentExternalSystemAdapterImpl(
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
         
-        // Shared HttpClient - truly non-blocking with Netty event loop
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
             .responseTimeout(Duration.ofMillis(120000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
@@ -64,7 +62,6 @@ class PaymentExternalSystemAdapterImpl(
         logger.warn("[$accountName] Initialized with rateLimitPerSec=$rateLimitPerSec, parallelRequests=$parallelRequests")
     }
 
-    // WebClient - truly non-blocking, uses Netty event loop (not threads)
     private val webClient: WebClient = WebClient.builder()
         .baseUrl("http://$paymentProviderHostPort")
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
@@ -73,7 +70,6 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        // Fire and forget ES update - don't block the hot path
         GlobalScope.launch(Dispatchers.IO) {
             try {
                 paymentESService.update(paymentId) {
@@ -84,24 +80,18 @@ class PaymentExternalSystemAdapterImpl(
             }
         }
 
-        // Execute payment asynchronously - fire immediately
         executePaymentReactive(paymentId, amount, transactionId)
     }
 
     private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        // First check rate limiter - this is fast
-        if (!rateLimiter.tick()) {
-            // Schedule retry with minimal delay if rate limited
-            GlobalScope.launch(Dispatchers.Default) {
-                delay(5)
-                executePaymentReactive(paymentId, amount, transactionId)
-            }
-            return
-        }
-
-        // Try to acquire semaphore permit
         if (!semaphore.tryAcquire()) {
-            // Schedule retry with minimal delay if no permits
+            GlobalScope.launch(Dispatchers.Default) {
+                delay(5)
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
+            return
+        }
+        if (!rateLimiter.tick()) {
             GlobalScope.launch(Dispatchers.Default) {
                 delay(5)
                 executePaymentReactive(paymentId, amount, transactionId)
@@ -109,7 +99,6 @@ class PaymentExternalSystemAdapterImpl(
             return
         }
 
-        // We have rate limit token and semaphore permit - make the HTTP call
         val startTime = System.nanoTime()
 
         webClient.post()
@@ -139,7 +128,6 @@ class PaymentExternalSystemAdapterImpl(
 
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}")
 
-                    // Record metrics
                     Timer.builder("payment_request_latency_seconds")
                         .tags("target", paymentProviderHostPort, "account", accountName, "status_code", "200", "result", body.result.toString())
                         .publishPercentileHistogram()
@@ -148,7 +136,6 @@ class PaymentExternalSystemAdapterImpl(
 
                     meterRegistry.counter("service_outgoing_requests_total", "target", paymentProviderHostPort, "account", accountName, "status", "200").increment()
 
-                    // Log result asynchronously
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
                             paymentESService.update(paymentId) {

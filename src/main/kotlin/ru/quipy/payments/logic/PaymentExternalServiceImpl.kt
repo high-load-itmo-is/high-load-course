@@ -12,13 +12,17 @@ import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
+import ru.quipy.common.utils.CompositeRateLimiter
+import ru.quipy.common.utils.RateLimiter
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.SlowStartRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.TimeUnit
 
 
 class PaymentExternalSystemAdapterImpl(
@@ -50,9 +54,16 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter = SlidingWindowRateLimiter(
-        rateLimitPerSec.toLong(),
-        Duration.ofSeconds(1)
+    private val rateLimiter: RateLimiter = CompositeRateLimiter(
+        SlowStartRateLimiter(
+            targetRate = rateLimitPerSec,
+            timeUnit = TimeUnit.SECONDS,
+            slowStartOn = true,
+        ),
+        SlidingWindowRateLimiter(
+            rateLimitPerSec.toLong(),
+            Duration.ofSeconds(1)
+        )
     )
     private val semaphore = Semaphore(parallelRequests)
     
@@ -101,15 +112,16 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        if (!semaphore.tryAcquire()) {
+        // First respect RPS limits to avoid acquiring parallel slot too early
+        if (!rateLimiter.tick()) {
             GlobalScope.launch(Dispatchers.Default) {
-                delay(1)
+                delay(2)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
         }
-        if (!rateLimiter.tick()) {
-            semaphore.release()
+        // Then try to acquire a parallel requests slot
+        if (!semaphore.tryAcquire()) {
             GlobalScope.launch(Dispatchers.Default) {
                 delay(1)
                 executePaymentReactive(paymentId, amount, transactionId)

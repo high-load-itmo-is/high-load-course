@@ -84,7 +84,7 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
         GlobalScope.launch(Dispatchers.IO) {
@@ -100,22 +100,9 @@ class PaymentExternalSystemAdapterImpl(
         executePaymentReactive(paymentId, amount, transactionId)
     }
 
-    private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        if (!semaphore.tryAcquire()) {
-            GlobalScope.launch(Dispatchers.Default) {
-                delay(1)
-                executePaymentReactive(paymentId, amount, transactionId)
-            }
-            return
-        }
-        if (!rateLimiter.tick()) {
-            semaphore.release()
-            GlobalScope.launch(Dispatchers.Default) {
-                delay(1)
-                executePaymentReactive(paymentId, amount, transactionId)
-            }
-            return
-        }
+    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
+        semaphore.acquire()
+        rateLimiter.tickBlocking()
 
         webClient.post()
             .uri { uriBuilder ->

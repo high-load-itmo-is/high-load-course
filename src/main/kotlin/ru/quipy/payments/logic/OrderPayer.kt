@@ -24,7 +24,7 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
         
         GlobalScope.launch(Dispatchers.IO) {

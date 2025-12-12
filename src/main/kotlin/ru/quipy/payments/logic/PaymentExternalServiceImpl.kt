@@ -108,14 +108,7 @@ class PaymentExternalSystemAdapterImpl(
             }
             return
         }
-        if (!rateLimiter.tick()) {
-            semaphore.release()
-            GlobalScope.launch(Dispatchers.Default) {
-                delay(1)
-                executePaymentReactive(paymentId, amount, transactionId)
-            }
-            return
-        }
+        rateLimiter.tickBlocking()
 
         webClient.post()
             .uri { uriBuilder ->

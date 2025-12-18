@@ -27,15 +27,14 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
         
-        GlobalScope.launch(Dispatchers.IO) {
-            try {
-                paymentESService.create {
-                    it.create(paymentId, orderId, amount)
-                }
-                logger.trace("Payment $paymentId for order $orderId created.")
-            } catch (e: Exception) {
-                logger.error("Error creating payment $paymentId for order $orderId", e)
+        try {
+            // Create aggregate synchronously to avoid races with further updates
+            paymentESService.create {
+                it.create(paymentId, orderId, amount)
             }
+            logger.trace("Payment $paymentId for order $orderId created.")
+        } catch (e: Exception) {
+            logger.error("Error creating payment $paymentId for order $orderId", e)
         }
 
         paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)

@@ -2,14 +2,19 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.asCoroutineDispatcher
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
+import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
 import ru.quipy.common.utils.CompositeRateLimiter
@@ -23,6 +28,7 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 
 
 class PaymentExternalSystemAdapterImpl(
@@ -47,6 +53,7 @@ class PaymentExternalSystemAdapterImpl(
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
             .responseTimeout(Duration.ofMillis(120000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
+            .protocol(HttpProtocol.H2C, HttpProtocol.HTTP11)
     }
 
     private val serviceName = properties.serviceName
@@ -82,13 +89,18 @@ class PaymentExternalSystemAdapterImpl(
     private val errorCounter = meterRegistry.counter(
         "service_outgoing_requests_total",
         "target", paymentProviderHostPort,
-        "account", accountName,
+        "account", accountName, 
         "status", "exception"
     )
     
     init {
         logger.warn("[$accountName] Initialized with rateLimitPerSec=$rateLimitPerSec, parallelRequests=$parallelRequests")
     }
+
+    private val dispatcher = Executors
+        .newFixedThreadPool((parallelRequests * 2).coerceAtLeast(128))
+        .asCoroutineDispatcher()
+    private val coroutineScope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val webClient: WebClient = WebClient.builder()
         .baseUrl("http://$paymentProviderHostPort")
@@ -98,14 +110,13 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        GlobalScope.launch(Dispatchers.IO) {
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+        try {
+            // Log submission synchronously to ensure aggregate exists and preserve ordering
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
+        } catch (e: Exception) {
+            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
 
         executePaymentReactive(paymentId, amount, transactionId)
@@ -114,7 +125,7 @@ class PaymentExternalSystemAdapterImpl(
     private fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
         // First respect RPS limits to avoid acquiring parallel slot too early
         if (!rateLimiter.tick()) {
-            GlobalScope.launch(Dispatchers.Default) {
+            coroutineScope.launch {
                 delay(2)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
@@ -122,7 +133,7 @@ class PaymentExternalSystemAdapterImpl(
         }
         // Then try to acquire a parallel requests slot
         if (!semaphore.tryAcquire()) {
-            GlobalScope.launch(Dispatchers.Default) {
+            coroutineScope.launch {
                 delay(1)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
@@ -158,7 +169,7 @@ class PaymentExternalSystemAdapterImpl(
 
                     successCounter.increment()
 
-                    GlobalScope.launch(Dispatchers.IO) {
+                    coroutineScope.launch {
                         try {
                             paymentESService.update(paymentId) {
                                 it.logProcessing(body.result, now(), transactionId, reason = body.message)
@@ -176,7 +187,7 @@ class PaymentExternalSystemAdapterImpl(
                         else -> errorCounter.increment()
                     }
 
-                    GlobalScope.launch(Dispatchers.IO) {
+                    coroutineScope.launch {
                         try {
                             paymentESService.update(paymentId) {
                                 it.logProcessing(false, now(), transactionId, reason = error.message)

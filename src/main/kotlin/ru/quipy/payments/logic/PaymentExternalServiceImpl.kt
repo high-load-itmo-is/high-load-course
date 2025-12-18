@@ -28,6 +28,7 @@ import java.util.*
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
+import kotlin.math.roundToLong
 
 
 class PaymentExternalSystemAdapterImpl(
@@ -61,7 +62,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val rateLimiter: RateLimiter = SlidingWindowRateLimiter(
-        rateLimitPerSec.toLong(),
+        (rateLimitPerSec * 1.05).roundToLong(), // небольшой запас, чтобы компенсировать джиттер таймеров
         Duration.ofSeconds(1)
     )
     private val semaphore = Semaphore(parallelRequests)
@@ -118,7 +119,7 @@ class PaymentExternalSystemAdapterImpl(
         // First respect RPS limits to avoid acquiring parallel slot too early
         if (!rateLimiter.tick()) {
             coroutineScope.launch {
-                delay(2)
+                delay(0)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
@@ -126,7 +127,7 @@ class PaymentExternalSystemAdapterImpl(
         // Then try to acquire a parallel requests slot
         if (!semaphore.tryAcquire()) {
             coroutineScope.launch {
-                delay(1)
+                delay(0)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return

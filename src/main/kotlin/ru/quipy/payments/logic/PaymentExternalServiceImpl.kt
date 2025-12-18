@@ -20,7 +20,6 @@ import reactor.netty.resources.ConnectionProvider
 import ru.quipy.common.utils.CompositeRateLimiter
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.common.utils.SlidingWindowRateLimiter
-import ru.quipy.common.utils.SlowStartRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -61,16 +60,9 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter: RateLimiter = CompositeRateLimiter(
-        SlowStartRateLimiter(
-            targetRate = rateLimitPerSec,
-            timeUnit = TimeUnit.SECONDS,
-            slowStartOn = true,
-        ),
-        SlidingWindowRateLimiter(
-            rateLimitPerSec.toLong(),
-            Duration.ofSeconds(1)
-        )
+    private val rateLimiter: RateLimiter = SlidingWindowRateLimiter(
+        rateLimitPerSec.toLong(),
+        Duration.ofSeconds(1)
     )
     private val semaphore = Semaphore(parallelRequests)
     

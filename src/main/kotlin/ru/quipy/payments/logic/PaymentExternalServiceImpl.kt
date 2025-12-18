@@ -51,8 +51,8 @@ class PaymentExternalSystemAdapterImpl(
             .build()
         
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
-            .responseTimeout(Duration.ofMillis(120000))
-            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
+            .responseTimeout(Duration.ofMillis(60000))
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000)
             .protocol(HttpProtocol.H2C, HttpProtocol.HTTP11)
     }
 
@@ -62,7 +62,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val rateLimiter: RateLimiter = SlidingWindowRateLimiter(
-        (rateLimitPerSec * 1.05).roundToLong(), // небольшой запас, чтобы компенсировать джиттер таймеров
+        rateLimitPerSec.toLong(),
         Duration.ofSeconds(1)
     )
     private val semaphore = Semaphore(parallelRequests)
@@ -91,7 +91,7 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private val dispatcher = Executors
-        .newFixedThreadPool((parallelRequests * 2).coerceAtLeast(128))
+        .newFixedThreadPool((parallelRequests * 4).coerceAtLeast(512))
         .asCoroutineDispatcher()
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatcher)
 

@@ -155,8 +155,6 @@ class PaymentExternalSystemAdapterImpl(
             }
 
         } catch (e: Exception) {
-            semaphore.release()
-            
             logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
             when (e) {

@@ -10,6 +10,7 @@ import io.netty.channel.ChannelOption
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
+import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
 import ru.quipy.common.utils.SlidingWindowRateLimiter
@@ -32,15 +33,16 @@ class PaymentExternalSystemAdapterImpl(
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
-        
+
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
             .maxConnections(100_000)
             .pendingAcquireMaxCount(100_000)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
-        
+
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
+            .protocol(HttpProtocol.H2C)
             .responseTimeout(Duration.ofMillis(120000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
     }
@@ -87,14 +89,12 @@ class PaymentExternalSystemAdapterImpl(
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        GlobalScope.launch(Dispatchers.IO) {
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+        try {
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
+        } catch (e: Exception) {
+            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
 
         executePaymentReactive(paymentId, amount, transactionId)
@@ -133,14 +133,12 @@ class PaymentExternalSystemAdapterImpl(
 
                     successCounter.increment()
 
-                    GlobalScope.launch(Dispatchers.IO) {
-                        try {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                            }
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
+                    try {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
                         }
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
                     }
                 },
                 { error ->
@@ -151,14 +149,12 @@ class PaymentExternalSystemAdapterImpl(
                         else -> errorCounter.increment()
                     }
 
-                    GlobalScope.launch(Dispatchers.IO) {
-                        try {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = error.message)
-                            }
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] Failed to log failure for payment $paymentId", e)
+                    try {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = error.message)
                         }
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] Failed to log failure for payment $paymentId", e)
                     }
                 }
             )

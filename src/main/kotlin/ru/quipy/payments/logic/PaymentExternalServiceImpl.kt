@@ -122,8 +122,8 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
+        rateLimiter.tickSuspending()
         semaphore.acquire()
-        rateLimiter.tickBlocking()
 
         try {
             val responseBody = webClient.post()

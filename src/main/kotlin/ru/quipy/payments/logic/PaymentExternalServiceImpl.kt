@@ -99,12 +99,14 @@ class PaymentExternalSystemAdapterImpl(
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        try {
-            paymentESService.update(paymentId) {
-                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        paymentScope.launch {
+            try {
+                paymentESService.update(paymentId) {
+                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                }
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
             }
-        } catch (e: Exception) {
-            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
 
         executePaymentReactive(paymentId, amount, transactionId)

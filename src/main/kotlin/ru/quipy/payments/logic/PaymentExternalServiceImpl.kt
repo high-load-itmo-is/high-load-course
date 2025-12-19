@@ -8,6 +8,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
@@ -94,6 +95,19 @@ class PaymentExternalSystemAdapterImpl(
         .newFixedThreadPool((parallelRequests * 4).coerceAtLeast(512))
         .asCoroutineDispatcher()
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val esTasks = Channel<suspend () -> Unit>(capacity = 100_000)
+
+    init {
+        val workers = (parallelRequests.coerceAtLeast(16)).coerceAtMost(64)
+        repeat(workers) {
+            coroutineScope.launch {
+                for (task in esTasks) {
+                    runCatching { task() }
+                        .onFailure { e -> logger.error("[$accountName] ES task failed", e) }
+                }
+            }
+        }
+    }
 
     private val webClient: WebClient = WebClient.builder()
         .baseUrl("http://$paymentProviderHostPort")
@@ -103,13 +117,10 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        try {
-            // Log submission synchronously to ensure aggregate exists and preserve ordering
+        enqueueEsTask {
             paymentESService.update(paymentId) {
                 it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
-        } catch (e: Exception) {
-            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
 
         executePaymentReactive(paymentId, amount, transactionId)
@@ -119,7 +130,7 @@ class PaymentExternalSystemAdapterImpl(
         // First respect RPS limits to avoid acquiring parallel slot too early
         if (!rateLimiter.tick()) {
             coroutineScope.launch {
-                delay(0)
+                delay(2)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
@@ -127,7 +138,7 @@ class PaymentExternalSystemAdapterImpl(
         // Then try to acquire a parallel requests slot
         if (!semaphore.tryAcquire()) {
             coroutineScope.launch {
-                delay(0)
+                delay(1)
                 executePaymentReactive(paymentId, amount, transactionId)
             }
             return
@@ -162,13 +173,9 @@ class PaymentExternalSystemAdapterImpl(
 
                     successCounter.increment()
 
-                    coroutineScope.launch {
-                        try {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                            }
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
+                    enqueueEsTask {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
                         }
                     }
                 },
@@ -180,13 +187,9 @@ class PaymentExternalSystemAdapterImpl(
                         else -> errorCounter.increment()
                     }
 
-                    coroutineScope.launch {
-                        try {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = error.message)
-                            }
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] Failed to log failure for payment $paymentId", e)
+                    enqueueEsTask {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = error.message)
                         }
                     }
                 }
@@ -198,6 +201,12 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
+
+    private fun enqueueEsTask(block: suspend () -> Unit) {
+        if (!esTasks.trySend(block).isSuccess) {
+            logger.error("[$accountName] ES task queue overflow, dropping log")
+        }
+    }
 }
 
 data class PaymentResult(val success: Boolean, val message: String?)

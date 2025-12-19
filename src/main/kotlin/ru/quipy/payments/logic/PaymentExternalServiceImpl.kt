@@ -3,6 +3,7 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import kotlinx.coroutines.*
+import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.sync.Semaphore
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
@@ -13,12 +14,14 @@ import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeoutException
 
 
@@ -33,6 +36,13 @@ class PaymentExternalSystemAdapterImpl(
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
+
+        private val sharedDispatcher = Executors.newFixedThreadPool(
+            64,
+            NamedThreadFactory("payment-worker")
+        ).asCoroutineDispatcher()
+        
+        val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
             .maxConnections(100_000)
@@ -104,60 +114,64 @@ class PaymentExternalSystemAdapterImpl(
         semaphore.acquire()
         rateLimiter.tickBlocking()
 
-        webClient.post()
-            .uri { uriBuilder ->
-                uriBuilder.path("/external/process")
-                    .queryParam("serviceName", serviceName)
-                    .queryParam("token", token)
-                    .queryParam("accountName", accountName)
-                    .queryParam("transactionId", transactionId)
-                    .queryParam("paymentId", paymentId)
-                    .queryParam("amount", amount)
-                    .build()
-            }
-            .retrieve()
-            .bodyToMono<String>()
-            .doFinally { semaphore.release() }
-            .subscribe(
-                { responseBody ->
-                    val body = try {
-                        mapper.readValue(responseBody, ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                    }
-
-                    if (logger.isDebugEnabled) {
-                        logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
-                    }
-
-                    successCounter.increment()
-
-                    try {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                        }
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
-                    }
-                },
-                { error ->
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", error)
-
-                    when (error) {
-                        is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
-                        else -> errorCounter.increment()
-                    }
-
-                    try {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = error.message)
-                        }
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] Failed to log failure for payment $paymentId", e)
-                    }
+        try {
+            val responseBody = webClient.post()
+                .uri { uriBuilder ->
+                    uriBuilder.path("/external/process")
+                        .queryParam("serviceName", serviceName)
+                        .queryParam("token", token)
+                        .queryParam("accountName", accountName)
+                        .queryParam("transactionId", transactionId)
+                        .queryParam("paymentId", paymentId)
+                        .queryParam("amount", amount)
+                        .build()
                 }
-            )
+                .retrieve()
+                .bodyToMono<String>()
+                .doFinally {
+                    semaphore.release()
+                }
+                .awaitSingle()
+
+            val body = try {
+                mapper.readValue(responseBody, ExternalSysResponse::class.java)
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
+                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+            }
+
+            if (logger.isDebugEnabled) {
+                logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
+            }
+
+            successCounter.increment()
+
+            try {
+                paymentESService.update(paymentId) {
+                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                }
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
+            }
+
+        } catch (e: Exception) {
+            semaphore.release()
+            
+            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+            when (e) {
+                is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
+                else -> errorCounter.increment()
+            }
+
+            try {
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                }
+            } catch (ex: Exception) {
+                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
+            }
+        }
     }
 
     override fun price() = properties.price

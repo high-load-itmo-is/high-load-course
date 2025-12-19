@@ -1,8 +1,5 @@
 package ru.quipy.payments.logic
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -11,8 +8,6 @@ import org.springframework.stereotype.Service
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
-import java.util.concurrent.Executors
-import ru.quipy.common.utils.NamedThreadFactory
 
 @Service
 class OrderPayer {
@@ -27,13 +22,6 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val dispatcher = Executors.newFixedThreadPool(
-        64,
-        NamedThreadFactory("payment-worker")
-    ).asCoroutineDispatcher()
-
-    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-
     suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
 
@@ -46,7 +34,7 @@ class OrderPayer {
             logger.error("Error creating payment $paymentId for order $orderId", e)
         }
 
-        scope.launch {
+        PaymentExternalSystemAdapterImpl.paymentScope.launch {
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
         }
 

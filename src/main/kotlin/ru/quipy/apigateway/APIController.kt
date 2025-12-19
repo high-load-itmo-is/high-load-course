@@ -83,13 +83,6 @@ class APIController {
         Duration.ofSeconds(1)
     )
 
-    private val sharedDispatcher = Executors.newFixedThreadPool(
-        128,
-        NamedThreadFactory("payment-worker")
-    ).asCoroutineDispatcher()
-
-    private val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
-
     @PostMapping("/orders/{orderId}/payment")
     suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         if (!rateLimiter.tick()) {
@@ -102,10 +95,7 @@ class APIController {
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
 
-        val createdAt = System.currentTimeMillis()
-        paymentScope.launch {
-            orderPayer.processPayment(orderId, order.price, paymentId, deadline, createdAt)
-        }
+        val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

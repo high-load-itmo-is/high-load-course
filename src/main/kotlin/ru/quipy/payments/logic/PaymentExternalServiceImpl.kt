@@ -19,6 +19,7 @@ import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import ru.quipy.payments.logic.OrderPayer.Companion
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -49,6 +50,13 @@ class PaymentExternalSystemAdapterImpl(
             .protocol(HttpProtocol.H2C)
             .responseTimeout(Duration.ofMillis(120000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
+
+        private val sharedDispatcher = Executors.newFixedThreadPool(
+            64,
+            NamedThreadFactory("payment-worker")
+        ).asCoroutineDispatcher()
+
+        val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
     }
 
     private val serviceName = properties.serviceName
@@ -90,15 +98,25 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        try {
-            paymentESService.update(paymentId) {
-                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        paymentScope.launch {
+            try {
+                paymentESService.create {
+                    it.create(paymentId, orderId, amount)
+                }
+                OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
+            } catch (e: Exception) {
+                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
             }
-        } catch (e: Exception) {
-            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+            try {
+                paymentESService.update(paymentId) {
+                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                }
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+            }
         }
         executePaymentReactive(paymentId, amount, transactionId)
     }

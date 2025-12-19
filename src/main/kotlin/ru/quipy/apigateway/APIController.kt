@@ -84,7 +84,7 @@ class APIController {
     )
 
     private val sharedDispatcher = Executors.newFixedThreadPool(
-        64,
+        128,
         NamedThreadFactory("payment-worker")
     ).asCoroutineDispatcher()
 

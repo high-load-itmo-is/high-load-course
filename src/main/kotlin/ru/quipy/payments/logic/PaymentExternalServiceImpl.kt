@@ -10,6 +10,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.WebClientResponseException.TooManyRequests
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
@@ -99,16 +100,13 @@ class PaymentExternalSystemAdapterImpl(
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        paymentScope.launch {
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+        try {
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
+        } catch (e: Exception) {
+            logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
         }
-
         executePaymentReactive(paymentId, amount, transactionId)
     }
 
@@ -156,6 +154,9 @@ class PaymentExternalSystemAdapterImpl(
                 logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
             }
 
+        } catch (e: TooManyRequests) {
+            logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
+            executePaymentReactive(paymentId, amount, transactionId)
         } catch (e: Exception) {
             logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 

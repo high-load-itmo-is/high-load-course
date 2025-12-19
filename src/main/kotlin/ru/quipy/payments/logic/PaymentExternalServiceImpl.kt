@@ -38,13 +38,6 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
 
-        private val sharedDispatcher = Executors.newFixedThreadPool(
-            64,
-            NamedThreadFactory("payment-worker")
-        ).asCoroutineDispatcher()
-        
-        val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
-
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
             .maxConnections(100_000)
             .pendingAcquireMaxCount(100_000)

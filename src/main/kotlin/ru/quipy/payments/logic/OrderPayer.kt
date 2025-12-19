@@ -22,9 +22,7 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        val createdAt = System.currentTimeMillis()
-
+    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long, createdAt: Long) {
         try {
             paymentESService.create {
                 it.create(paymentId, orderId, amount)
@@ -34,10 +32,6 @@ class OrderPayer {
             logger.error("Error creating payment $paymentId for order $orderId", e)
         }
 
-        PaymentExternalSystemAdapterImpl.paymentScope.launch {
-            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-        }
-
-        return createdAt
+        paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
     }
 }

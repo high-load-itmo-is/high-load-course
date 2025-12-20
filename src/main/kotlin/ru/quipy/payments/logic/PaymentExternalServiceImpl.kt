@@ -12,6 +12,7 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClientResponseException.TooManyRequests
 import org.springframework.web.reactive.function.client.bodyToMono
+import org.testcontainers.shaded.com.google.common.math.IntMath.pow
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
@@ -23,8 +24,10 @@ import ru.quipy.payments.logic.OrderPayer.Companion
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeoutException
+import kotlin.math.pow
 
 
 class PaymentExternalSystemAdapterImpl(
@@ -47,7 +50,7 @@ class PaymentExternalSystemAdapterImpl(
 
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
             .protocol(HttpProtocol.H2C)
-            .responseTimeout(Duration.ofMillis(120000))
+            .responseTimeout(Duration.ofMillis(30000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
 
         private val sharedDispatcher = Executors.newFixedThreadPool(
@@ -96,6 +99,8 @@ class PaymentExternalSystemAdapterImpl(
         .baseUrl("http://$paymentProviderHostPort")
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
+
+    val retryMap: MutableMap<UUID, Int> = ConcurrentHashMap()
 
     override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
@@ -156,17 +161,26 @@ class PaymentExternalSystemAdapterImpl(
 
             successCounter.increment()
 
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+            paymentScope.launch {
+                try {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    }
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
                 }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
             }
 
         } catch (e: TooManyRequests) {
             logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
-            executePaymentReactive(paymentId, amount, transactionId)
+            val attempt = retryMap.compute(transactionId) { _, value ->
+                (value ?: 0) + 1
+            }!!
+
+            if (attempt < 5) {
+                delay((100 * 2.0.pow(attempt)).toLong())
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
         } catch (e: Exception) {
             logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
@@ -175,12 +189,14 @@ class PaymentExternalSystemAdapterImpl(
                 else -> errorCounter.increment()
             }
 
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
+            paymentScope.launch {
+                try {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+                } catch (ex: Exception) {
+                    logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
                 }
-            } catch (ex: Exception) {
-                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
             }
         }
     }

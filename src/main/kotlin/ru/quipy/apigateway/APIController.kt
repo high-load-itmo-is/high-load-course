@@ -16,7 +16,6 @@ import java.util.*
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.server.ResponseStatusException
-import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.NamedThreadFactory
 import java.util.concurrent.Executors
 
@@ -79,10 +78,9 @@ class APIController {
         PAID,
     }
 
-    private val rateLimiter = LeakingBucketRateLimiter(
-        1000,
-        Duration.ofSeconds(1),
-        1500
+    private val rateLimiter = SlidingWindowRateLimiter(
+        1100,
+        Duration.ofSeconds(1)
     )
 
     @PostMapping("/orders/{orderId}/payment")

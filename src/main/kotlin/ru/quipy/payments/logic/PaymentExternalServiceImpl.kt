@@ -64,10 +64,9 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter = LeakingBucketRateLimiter(
-        rateLimitPerSec.toLong(),
-        Duration.ofSeconds(1),
-        2*rateLimitPerSec
+    private val rateLimiter = SlidingWindowRateLimiter(
+        (0.9*rateLimitPerSec.toLong()).toLong(),
+        Duration.ofSeconds(1)
     )
     private val semaphore = Semaphore(parallelRequests)
     
@@ -124,9 +123,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
         semaphore.acquire()
-        while (!rateLimiter.tick()) {
-            delay(1)
-        }
+        rateLimiter.tickSuspending()
 
         try {
             val responseBody = webClient.post()

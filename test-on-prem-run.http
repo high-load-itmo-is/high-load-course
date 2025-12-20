@@ -7,7 +7,7 @@ Content-Type: application/json
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
   "accounts": "acc-12",
-  "branch": "hw-9_last",
+  "branch": "hw-9-new-Etozheraf",
   "ratePerSecond": 1000,
   "testCount": 200000,
   "processingTimeMillis": 50000

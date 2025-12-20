@@ -15,6 +15,7 @@ import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
@@ -63,9 +64,10 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val rateLimiter = SlidingWindowRateLimiter(
+    private val rateLimiter = LeakingBucketRateLimiter(
         rateLimitPerSec.toLong(),
-        Duration.ofSeconds(1)
+        Duration.ofSeconds(1),
+        2*rateLimitPerSec
     )
     private val semaphore = Semaphore(parallelRequests)
     
@@ -122,7 +124,9 @@ class PaymentExternalSystemAdapterImpl(
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
         semaphore.acquire()
-        rateLimiter.tickSuspending()
+        while (!rateLimiter.tick()) {
+            delay(1)
+        }
 
         try {
             val responseBody = webClient.post()

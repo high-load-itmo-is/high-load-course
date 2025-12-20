@@ -40,8 +40,7 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(100_000)
-            .pendingAcquireMaxCount(100_000)
+            .maxConnections(2_000)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
@@ -122,8 +121,8 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        rateLimiter.tickSuspending()
         semaphore.acquire()
+        rateLimiter.tickSuspending()
 
         try {
             val responseBody = webClient.post()

@@ -1,9 +1,5 @@
 package ru.quipy.apigateway
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -16,8 +12,6 @@ import java.util.*
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.server.ResponseStatusException
-import ru.quipy.common.utils.NamedThreadFactory
-import java.util.concurrent.Executors
 
 class TooManyPaymentRequestsException(
     private val retryAfterSeconds: Long
@@ -79,7 +73,7 @@ class APIController {
     }
 
     private val rateLimiter = SlidingWindowRateLimiter(
-        1100,
+        5000,
         Duration.ofSeconds(1)
     )
 
@@ -95,7 +89,8 @@ class APIController {
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
 
-        val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+        val (createdAt, jobs) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+        logger.debug("Payment flow started for order {}, payment {}, jobs={}", orderId, paymentId, jobs.size)
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

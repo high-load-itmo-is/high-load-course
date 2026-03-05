@@ -45,23 +45,28 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(2_000)
+            .maxConnections(64)
             .pendingAcquireMaxCount(5_000)
             .pendingAcquireTimeout(Duration.ofMillis(200))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
 
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
-            .protocol(HttpProtocol.H2C, HttpProtocol.HTTP11)
+            .protocol(HttpProtocol.H2C)
             .responseTimeout(Duration.ofMillis(900))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 200)
 
         private val sharedDispatcher = Executors.newFixedThreadPool(
-            64,
+            128,
+            NamedThreadFactory("payment-worker")
+        ).asCoroutineDispatcher()
+        private val dbDispatcher = Executors.newFixedThreadPool(
+            128,
             NamedThreadFactory("payment-worker")
         ).asCoroutineDispatcher()
 
         val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
+        val dbScope = CoroutineScope(dbDispatcher)
     }
 
     private val serviceName = properties.serviceName
@@ -106,21 +111,35 @@ class PaymentExternalSystemAdapterImpl(
     override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long): Job {
         val transactionId = UUID.randomUUID()
         return paymentScope.launch {
-            try {
-                paymentESService.create {
-                    it.create(paymentId, orderId, amount)
+            val created = withContext(dbDispatcher) {
+                try {
+                    paymentESService.create {
+                        it.create(paymentId, orderId, amount)
+                    }
+                    OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
+                    true
+                } catch (e: Exception) {
+                    OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
+                    false
                 }
-                OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
-            } catch (e: Exception) {
-                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
             }
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+            if (!created) return@launch
+
+            withContext(dbDispatcher) {
+                try {
+                    paymentESService.update(paymentId) {
+                        it.logSubmission(
+                            success = true,
+                            transactionId,
+                            now(),
+                            Duration.ofMillis(now() - paymentStartedAt)
+                        )
+                    }
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
                 }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
             }
+
             executePaymentReactive(paymentId, amount, transactionId, deadline)
         }
     }
@@ -129,7 +148,10 @@ class PaymentExternalSystemAdapterImpl(
         var attempt = 1
         while (attempt <= max429Retries) {
             try {
-                rateLimiter.tickSuspending()
+                if (!rateLimiter.tick()) {
+                    ++attempt
+                    continue
+                }
                 semaphore.acquire()
                 val responseBody = try {
                     webClient.post()
@@ -163,12 +185,14 @@ class PaymentExternalSystemAdapterImpl(
 
                 successCounter.increment()
 
-                try {
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                withContext(dbDispatcher) {
+                    try {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        }
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
                     }
-                } catch (e: Exception) {
-                    logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
                 }
                 return
             } catch (e: TooManyRequests) {
@@ -205,12 +229,14 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private suspend fun logFailure(paymentId: UUID, transactionId: UUID, reason: String?) {
-        try {
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = reason)
+        withContext(dbDispatcher) {
+            try {
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = reason)
+                }
+            } catch (ex: Exception) {
+                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
             }
-        } catch (ex: Exception) {
-            logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
         }
     }
 

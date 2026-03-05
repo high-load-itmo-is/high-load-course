@@ -80,7 +80,10 @@ class APIController {
     @PostMapping("/orders/{orderId}/payment")
     suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         if (!rateLimiter.tick()) {
-            throw TooManyPaymentRequestsException(15)
+            throw TooManyPaymentRequestsException(1)
+        }
+        if (deadline < System.currentTimeMillis() + 200) {
+            throw TooManyPaymentRequestsException(1)
         }
 
         val paymentId = UUID.randomUUID()

@@ -7,14 +7,12 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import io.micrometer.core.instrument.MeterRegistry
-import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.*
+import ru.quipy.payments.persistence.PaymentReactiveEventRepository
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
-import java.util.*
 
 
 @Configuration
@@ -38,7 +36,7 @@ class PaymentAccountsConfig {
 
     @Bean
     fun accountAdapters(
-        paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+        paymentEventRepository: PaymentReactiveEventRepository,
         meterRegistry: MeterRegistry,
     ): List<PaymentExternalSystemAdapter> {
         val request = HttpRequest.newBuilder()
@@ -59,7 +57,7 @@ class PaymentAccountsConfig {
             .map {
                 PaymentExternalSystemAdapterImpl(
                     it,
-                    paymentService,
+                    paymentEventRepository,
                     paymentProviderHostPort,
                     token,
                     meterRegistry,

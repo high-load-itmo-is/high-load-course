@@ -15,12 +15,10 @@ import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
-import reactor.netty.resources.LoopResources
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
-import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.OrderPayer.Companion
+import ru.quipy.payments.persistence.PaymentReactiveEventRepository
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -32,7 +30,7 @@ import kotlin.random.Random
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+    private val paymentEventRepository: PaymentReactiveEventRepository,
     private val paymentProviderHostPort: String,
     private val token: String,
     private val meterRegistry: MeterRegistry,
@@ -61,13 +59,8 @@ class PaymentExternalSystemAdapterImpl(
             64,
             NamedThreadFactory("payment-worker")
         ).asCoroutineDispatcher()
-        private val dbDispatcher = Executors.newFixedThreadPool(
-            64,
-            NamedThreadFactory("payment-worker")
-        ).asCoroutineDispatcher()
 
         val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
-        val dbScope = CoroutineScope(dbDispatcher)
     }
 
     private val serviceName = properties.serviceName
@@ -112,46 +105,62 @@ class PaymentExternalSystemAdapterImpl(
     override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long): Job {
         val transactionId = UUID.randomUUID()
         return paymentScope.launch {
-            val created = withContext(dbDispatcher) {
-                val startedAtMs = now()
-                try {
-                    paymentESService.create {
-                        it.create(paymentId, orderId, amount)
+            val startedAtMs = now()
+            val created = try {
+                paymentEventRepository.createPayment(paymentId, orderId, amount).also { createdNow ->
+                    if (createdNow) {
+                        OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
                     }
-                    OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
-                    true
-                } catch (e: Exception) {
-                    OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
-                    false
-                } finally {
-                    logger.info("[$accountName] DB create paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
                 }
+            } catch (e: Exception) {
+                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
+                false
+            } finally {
+                logger.info("[$accountName] DB create paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
             }
             if (!created) return@launch
 
-            withContext(dbDispatcher) {
-                val startedAtMs = now()
-                try {
-                    paymentESService.update(paymentId) {
-                        it.logSubmission(
-                            success = true,
-                            transactionId,
-                            now(),
-                            Duration.ofMillis(now() - paymentStartedAt)
-                        )
-                    }
-                } catch (e: Exception) {
-                    logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
-                } finally {
-                    logger.info("[$accountName] DB logSubmission paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
-                }
+            val submissionStartedAt = now()
+            val spentInQueueDuration = Duration.ofMillis(submissionStartedAt - paymentStartedAt)
+            val submissionStartedAtMs = now()
+
+            launch {
+                executePaymentReactive(
+                    paymentId = paymentId,
+                    orderId = orderId,
+                    amount = amount,
+                    transactionId = transactionId,
+                    deadline = deadline,
+                    submittedAt = submissionStartedAt,
+                    spentInQueueDuration = spentInQueueDuration,
+                )
             }
 
-            executePaymentReactive(paymentId, amount, transactionId, deadline)
+            try {
+                paymentEventRepository.logSubmission(
+                    paymentId = paymentId,
+                    orderId = orderId,
+                    transactionId = transactionId,
+                    startedAt = submissionStartedAt,
+                    spentInQueueDuration = spentInQueueDuration,
+                )
+            } catch (e: Exception) {
+                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
+            } finally {
+                logger.info("[$accountName] DB logSubmission paymentId=$paymentId txId=$transactionId took ${now() - submissionStartedAtMs}ms")
+            }
         }
     }
 
-    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID, deadline: Long) {
+    private suspend fun executePaymentReactive(
+        paymentId: UUID,
+        orderId: UUID,
+        amount: Int,
+        transactionId: UUID,
+        deadline: Long,
+        submittedAt: Long,
+        spentInQueueDuration: Duration,
+    ) {
         var attempt = 1
         while (attempt <= max429Retries) {
             try {
@@ -196,24 +205,38 @@ class PaymentExternalSystemAdapterImpl(
 
                 successCounter.increment()
 
-                withContext(dbDispatcher) {
-                    val startedAtMs = now()
-                    try {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                        }
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
-                    } finally {
-                        logger.info("[$accountName] DB logProcessing paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
-                    }
+                val startedAtMs = now()
+                try {
+                    paymentEventRepository.logProcessing(
+                        paymentId = paymentId,
+                        orderId = orderId,
+                        amount = amount,
+                        transactionId = transactionId,
+                        success = body.result,
+                        submittedAt = submittedAt,
+                        processedAt = now(),
+                        spentInQueueDuration = spentInQueueDuration,
+                        reason = body.message,
+                    )
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
+                } finally {
+                    logger.info("[$accountName] DB logProcessing paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
                 }
                 return
             } catch (e: TooManyRequests) {
                 if (attempt >= max429Retries) {
                     logger.error("[$accountName] Payment failed for txId: $transactionId with 429 after $attempt attempts")
                     errorCounter.increment()
-                    logFailure(paymentId, transactionId, e.message ?: "Too Many Requests")
+                    logFailure(
+                        paymentId = paymentId,
+                        orderId = orderId,
+                        amount = amount,
+                        transactionId = transactionId,
+                        submittedAt = submittedAt,
+                        spentInQueueDuration = spentInQueueDuration,
+                        reason = e.message ?: "Too Many Requests",
+                    )
                     return
                 }
 
@@ -221,7 +244,15 @@ class PaymentExternalSystemAdapterImpl(
                 if (delayMs <= 0L) {
                     logger.error("[$accountName] Payment failed for txId: $transactionId due to deadline before retry")
                     errorCounter.increment()
-                    logFailure(paymentId, transactionId, "Deadline reached before retry")
+                    logFailure(
+                        paymentId = paymentId,
+                        orderId = orderId,
+                        amount = amount,
+                        transactionId = transactionId,
+                        submittedAt = submittedAt,
+                        spentInQueueDuration = spentInQueueDuration,
+                        reason = "Deadline reached before retry",
+                    )
                     return
                 }
 
@@ -236,24 +267,46 @@ class PaymentExternalSystemAdapterImpl(
                     else -> errorCounter.increment()
                 }
 
-                logFailure(paymentId, transactionId, e.message)
+                logFailure(
+                    paymentId = paymentId,
+                    orderId = orderId,
+                    amount = amount,
+                    transactionId = transactionId,
+                    submittedAt = submittedAt,
+                    spentInQueueDuration = spentInQueueDuration,
+                    reason = e.message,
+                )
                 return
             }
         }
     }
 
-    private suspend fun logFailure(paymentId: UUID, transactionId: UUID, reason: String?) {
-        withContext(dbDispatcher) {
-            val startedAtMs = now()
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = reason)
-                }
-            } catch (ex: Exception) {
-                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
-            } finally {
-                logger.info("[$accountName] DB logFailure paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
-            }
+    private suspend fun logFailure(
+        paymentId: UUID,
+        orderId: UUID,
+        amount: Int,
+        transactionId: UUID,
+        submittedAt: Long,
+        spentInQueueDuration: Duration,
+        reason: String?,
+    ) {
+        val startedAtMs = now()
+        try {
+            paymentEventRepository.logProcessing(
+                paymentId = paymentId,
+                orderId = orderId,
+                amount = amount,
+                transactionId = transactionId,
+                success = false,
+                submittedAt = submittedAt,
+                processedAt = now(),
+                spentInQueueDuration = spentInQueueDuration,
+                reason = reason,
+            )
+        } catch (ex: Exception) {
+            logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
+        } finally {
+            logger.info("[$accountName] DB logFailure paymentId=$paymentId txId=$transactionId took ${now() - startedAtMs}ms")
         }
     }
 

@@ -1,17 +1,25 @@
 package ru.quipy.config
 
 import jakarta.annotation.PostConstruct
+import io.r2dbc.spi.ConnectionFactories
+import io.r2dbc.spi.ConnectionFactory
+import io.r2dbc.spi.ConnectionFactoryOptions
+import io.r2dbc.pool.ConnectionPool
+import io.r2dbc.pool.ConnectionPoolConfiguration
 import org.eclipse.jetty.http2.server.HTTP2CServerConnectionFactory
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer
 import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.r2dbc.core.DatabaseClient
 import ru.quipy.core.EventSourcingServiceFactory
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.PaymentAggregateState
 import ru.quipy.streams.AggregateEventStreamManager
+import java.time.Duration
 import java.util.*
 
 
@@ -51,6 +59,37 @@ class EventSourcingLibConfiguration {
      */
     @Bean
     fun paymentsEsService() = eventSourcingServiceFactory.create<UUID, PaymentAggregate, PaymentAggregateState>()
+
+    @Bean
+    fun r2dbcConnectionFactory(
+        @Value("\${spring.r2dbc.url}") url: String,
+        @Value("\${spring.r2dbc.username:}") username: String,
+        @Value("\${spring.r2dbc.password:}") password: String,
+        @Value("\${spring.r2dbc.pool.initial-size:10}") initialSize: Int,
+        @Value("\${spring.r2dbc.pool.max-size:50}") maxSize: Int,
+        @Value("\${spring.r2dbc.pool.max-idle-time:30s}") maxIdleTime: Duration,
+    ): ConnectionFactory {
+        val options = ConnectionFactoryOptions.parse(url).mutate().apply {
+            if (username.isNotBlank()) {
+                option(ConnectionFactoryOptions.USER, username)
+            }
+            if (password.isNotBlank()) {
+                option(ConnectionFactoryOptions.PASSWORD, password)
+            }
+        }.build()
+        val baseConnectionFactory = ConnectionFactories.get(options)
+        val poolConfig = ConnectionPoolConfiguration.builder(baseConnectionFactory)
+            .initialSize(initialSize)
+            .maxSize(maxSize)
+            .maxIdleTime(maxIdleTime)
+            .build()
+        return ConnectionPool(poolConfig)
+    }
+
+    @Bean
+    fun r2dbcDatabaseClient(connectionFactory: ConnectionFactory): DatabaseClient {
+        return DatabaseClient.create(connectionFactory)
+    }
 
     @PostConstruct
     fun init() {

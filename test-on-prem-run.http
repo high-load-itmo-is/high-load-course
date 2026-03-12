@@ -7,7 +7,7 @@ Content-Type: application/json
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
   "accounts": "acc-13",
-  "branch": "init_hw10",
+  "branch": "hw_10_fire_and_forget",
   "ratePerSecond": 4000,
   "testCount": 1500000,
   "processingTimeMillis": 1000

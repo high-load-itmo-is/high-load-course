@@ -97,27 +97,12 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
         paymentScope.launch {
-            try {
-                paymentESService.create {
-                    it.create(paymentId, orderId, amount)
-                }
-                OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
-            } catch (e: Exception) {
-                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
-            }
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
-            }
+            executePaymentReactive(paymentId, amount, transactionId)
         }
-        executePaymentReactive(paymentId, amount, transactionId)
     }
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
@@ -153,16 +138,7 @@ class PaymentExternalSystemAdapterImpl(
             if (logger.isDebugEnabled) {
                 logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
             }
-
             successCounter.increment()
-
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
-            }
 
         } catch (e: TooManyRequests) {
             logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
@@ -173,14 +149,6 @@ class PaymentExternalSystemAdapterImpl(
             when (e) {
                 is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
                 else -> errorCounter.increment()
-            }
-
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
-                }
-            } catch (ex: Exception) {
-                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
             }
         }
     }

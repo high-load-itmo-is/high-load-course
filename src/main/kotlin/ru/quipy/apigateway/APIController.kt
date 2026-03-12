@@ -79,12 +79,12 @@ class APIController {
     }
 
     private val rateLimiter = SlidingWindowRateLimiter(
-        1100,
+        5000,
         Duration.ofSeconds(1)
     )
 
     @PostMapping("/orders/{orderId}/payment")
-    suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
+    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         if (!rateLimiter.tick()) {
             throw TooManyPaymentRequestsException(15)
         }

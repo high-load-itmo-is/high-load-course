@@ -40,7 +40,7 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(3_000)
+            .maxConnections(100)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
@@ -97,7 +97,7 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
         paymentScope.launch {
@@ -109,6 +109,9 @@ class PaymentExternalSystemAdapterImpl(
             } catch (e: Exception) {
                 OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
             }
+            launch {
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
             try {
                 paymentESService.update(paymentId) {
                     it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
@@ -117,7 +120,6 @@ class PaymentExternalSystemAdapterImpl(
                 logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
             }
         }
-        executePaymentReactive(paymentId, amount, transactionId)
     }
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {

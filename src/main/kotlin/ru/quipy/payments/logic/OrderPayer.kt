@@ -24,18 +24,9 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val sharedDispatcher = Executors.newFixedThreadPool(
-        64,
-        NamedThreadFactory("payment-worker")
-    ).asCoroutineDispatcher()
-
-    val paymentScope = CoroutineScope(SupervisorJob() + sharedDispatcher)
-
-    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
-        paymentScope.launch {
-            paymentService.submitPaymentRequest(orderId, paymentId, amount, createdAt, deadline)
-        }
+        paymentService.submitPaymentRequest(orderId, paymentId, amount, createdAt, deadline)
         return createdAt
     }
 }

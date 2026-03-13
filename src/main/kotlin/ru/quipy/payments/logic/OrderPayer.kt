@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -17,9 +18,9 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Pair<Long, List<Job>> {
         val createdAt = System.currentTimeMillis()
-        paymentService.submitPaymentRequest(orderId, paymentId, amount, createdAt, deadline)
-        return createdAt
+        val jobs = paymentService.submitPaymentRequest(orderId, paymentId, amount, createdAt, deadline)
+        return Pair(createdAt, jobs)
     }
 }

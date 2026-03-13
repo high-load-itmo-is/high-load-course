@@ -16,3 +16,6 @@ Content-Type: application/json
 ### Stop running test to save credits
 # @timeout 120
 POST http://77.234.215.138:31234/test/stop/{{serviceName}}
+
+### Stop running test to save credits
+POST http://77.234.215.138:31234/test/stop/m3403-6

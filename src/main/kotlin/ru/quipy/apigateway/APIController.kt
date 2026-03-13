@@ -1,9 +1,6 @@
 package ru.quipy.apigateway
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -84,7 +81,7 @@ class APIController {
     )
 
     @PostMapping("/orders/{orderId}/payment")
-    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
+    suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         if (!rateLimiter.tick()) {
             throw TooManyPaymentRequestsException(15)
         }
@@ -95,7 +92,8 @@ class APIController {
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
 
-        val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+        val (createdAt, jobs) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+        jobs.forEach { job -> job.join() }
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

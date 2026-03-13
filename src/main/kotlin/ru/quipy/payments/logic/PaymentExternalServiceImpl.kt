@@ -29,7 +29,6 @@ import java.util.concurrent.TimeoutException
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
     private val meterRegistry: MeterRegistry,
@@ -40,7 +39,7 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(3_000)
+            .maxConnections(16)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
@@ -101,30 +100,14 @@ class PaymentExternalSystemAdapterImpl(
         val transactionId = UUID.randomUUID()
 
         paymentScope.launch {
-            try {
-                paymentESService.create {
-                    it.create(paymentId, orderId, amount)
-                }
-                OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
-            } catch (e: Exception) {
-                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
-            }
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
-            }
+            executePaymentReactive(paymentId, amount, transactionId)
         }
-        executePaymentReactive(paymentId, amount, transactionId)
     }
 
     private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        semaphore.acquire()
-        rateLimiter.tickSuspending()
-
         try {
+            semaphore.acquire()
+            rateLimiter.tickSuspending()
             val responseBody = webClient.post()
                 .uri { uriBuilder ->
                     uriBuilder.path("/external/process")
@@ -143,27 +126,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
                 .awaitSingle()
 
-            val body = try {
-                mapper.readValue(responseBody, ExternalSysResponse::class.java)
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
-                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-            }
-
-            if (logger.isDebugEnabled) {
-                logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
-            }
-
             successCounter.increment()
-
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
-            }
-
         } catch (e: TooManyRequests) {
             logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
             executePaymentReactive(paymentId, amount, transactionId)
@@ -173,14 +136,6 @@ class PaymentExternalSystemAdapterImpl(
             when (e) {
                 is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
                 else -> errorCounter.increment()
-            }
-
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
-                }
-            } catch (ex: Exception) {
-                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
             }
         }
     }

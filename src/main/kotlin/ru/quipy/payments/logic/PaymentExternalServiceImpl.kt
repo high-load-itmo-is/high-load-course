@@ -8,18 +8,19 @@ import kotlinx.coroutines.sync.Semaphore
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
+import io.netty.handler.timeout.ReadTimeoutException
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.WebClientRequestException
 import org.springframework.web.reactive.function.client.WebClientResponseException.TooManyRequests
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
+import reactor.netty.http.client.HttpClientRequest
 import reactor.netty.resources.ConnectionProvider
+import ru.quipy.apigateway.TooManyPaymentRequestsException
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
-import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
-import ru.quipy.payments.logic.OrderPayer.Companion
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -29,7 +30,6 @@ import java.util.concurrent.TimeoutException
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
     private val meterRegistry: MeterRegistry,
@@ -39,8 +39,10 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
 
+        private val maxConnections = 16
+        private val warmupConnections = 1000
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(3_000)
+            .maxConnections(maxConnections)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
@@ -97,90 +99,127 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        val transactionId = UUID.randomUUID()
-
-        paymentScope.launch {
-            try {
-                paymentESService.create {
-                    it.create(paymentId, orderId, amount)
+    fun preWarmConnection() {
+        val warmupTimeout = Duration.ofMillis(700)
+        val jobs = LinkedList<Job>()
+        repeat(warmupConnections) {
+            jobs.add(
+                paymentScope.launch {
+                    try {
+                        webClient.get()
+                            .uri { uriBuilder ->
+                                uriBuilder.path("/external/accounts")
+                                    .queryParam("serviceName", serviceName)
+                                    .queryParam("token", token)
+                                    .build()
+                            }
+                            .httpRequest { request ->
+                                request
+                                    .getNativeRequest<HttpClientRequest>()
+                                    .responseTimeout(warmupTimeout)
+                            }
+                            .retrieve()
+                            .bodyToMono<String>()
+                            .awaitSingle()
+                    } catch (e: Exception) {
+                    }
                 }
-                OrderPayer.logger.trace("Payment $paymentId for order $orderId created.")
-            } catch (e: Exception) {
-                OrderPayer.logger.error("Error creating payment $paymentId for order $orderId", e)
-            }
-            try {
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log submission for payment $paymentId", e)
-            }
+            )
         }
-        executePaymentReactive(paymentId, amount, transactionId)
+        runBlocking {
+            jobs.joinAll()
+        }
+        logger.info("[$accountName] Pre-warmed external provider connection")
     }
 
-    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        semaphore.acquire()
-        rateLimiter.tickSuspending()
+    override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) : Job {
+        val transactionId = UUID.randomUUID()
 
-        try {
-            val responseBody = webClient.post()
-                .uri { uriBuilder ->
-                    uriBuilder.path("/external/process")
-                        .queryParam("serviceName", serviceName)
-                        .queryParam("token", token)
-                        .queryParam("accountName", accountName)
-                        .queryParam("transactionId", transactionId)
-                        .queryParam("paymentId", paymentId)
-                        .queryParam("amount", amount)
-                        .build()
-                }
-                .retrieve()
-                .bodyToMono<String>()
-                .doFinally {
-                    semaphore.release()
-                }
-                .awaitSingle()
+        return paymentScope.async {
+            executePaymentReactive(paymentId, amount, transactionId, deadline)
+        }
+    }
 
-            val body = try {
-                mapper.readValue(responseBody, ExternalSysResponse::class.java)
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
-                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID, deadline: Long) {
+        while (true) {
+            if (now() + 500 > deadline) {
+                throw TooManyPaymentRequestsException(1)
             }
-
-            if (logger.isDebugEnabled) {
-                logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
+            if (!semaphore.tryAcquire()) {
+                throw TooManyPaymentRequestsException(1)
             }
-
-            successCounter.increment()
-
-            try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Failed to log processing result for payment $paymentId", e)
-            }
-
-        } catch (e: TooManyRequests) {
-            logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
-            executePaymentReactive(paymentId, amount, transactionId)
-        } catch (e: Exception) {
-            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-            when (e) {
-                is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
-                else -> errorCounter.increment()
+            if (!rateLimiter.tick()) {
+                semaphore.release()
+                throw TooManyPaymentRequestsException(1)
             }
 
             try {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                val timeoutMillis = deadline - now() - 100
+                if (timeoutMillis <= 0) {
+                    throw TooManyPaymentRequestsException(1)
                 }
-            } catch (ex: Exception) {
-                logger.error("[$accountName] Failed to log failure for payment $paymentId", ex)
+
+                val responseBody = webClient.post()
+                    .uri { uriBuilder ->
+                        uriBuilder.path("/external/process")
+                            .queryParam("serviceName", serviceName)
+                            .queryParam("token", token)
+                            .queryParam("accountName", accountName)
+                            .queryParam("transactionId", transactionId)
+                            .queryParam("paymentId", paymentId)
+                            .queryParam("amount", amount)
+                            .build()
+                    }
+                    .httpRequest { request ->
+                        request
+                            .getNativeRequest<HttpClientRequest>()
+                            .responseTimeout(Duration.ofMillis(timeoutMillis))
+                    }
+                    .retrieve()
+                    .bodyToMono<String>()
+                    .awaitSingle()
+
+                val body = try {
+                    mapper.readValue(responseBody, ExternalSysResponse::class.java)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
+                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                }
+
+                if (logger.isDebugEnabled) {
+                    logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
+                }
+                successCounter.increment()
+                return
+            } catch (e: TooManyRequests) {
+                logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
+            } catch (e: Exception) {
+                when (e) {
+                    is TimeoutException, is SocketTimeoutException, is ReadTimeoutException -> {
+                        timeoutCounter.increment()
+                        throw TooManyPaymentRequestsException(1)
+                    }
+                    is WebClientRequestException -> {
+                        if (
+                            e.cause is TimeoutException ||
+                            e.cause is SocketTimeoutException ||
+                            e.cause is ReadTimeoutException
+                        ) {
+                            timeoutCounter.increment()
+                            throw TooManyPaymentRequestsException(1)
+                        }
+                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        errorCounter.increment()
+                        return
+                    }
+                    else -> {
+                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        errorCounter.increment()
+                        return
+                    }
+                }
+            } finally {
+                semaphore.release()
             }
         }
     }

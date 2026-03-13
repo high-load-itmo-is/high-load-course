@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.Job
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
@@ -21,9 +22,11 @@ class PaymentSystemImpl(
         val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
     }
 
-    override suspend fun submitPaymentRequest(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun submitPaymentRequest(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) : List<Job> {
+        val jobs = LinkedList<Job>()
         for (account in paymentAccounts) {
-            account.performPaymentAsync(orderId, paymentId, amount, paymentStartedAt, deadline)
+            jobs.add(account.performPaymentAsync(orderId, paymentId, amount, paymentStartedAt, deadline))
         }
+        return jobs
     }
 }

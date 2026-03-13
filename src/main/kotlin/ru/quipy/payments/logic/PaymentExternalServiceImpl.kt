@@ -110,9 +110,13 @@ class PaymentExternalSystemAdapterImpl(
             if (now() + 500 > deadline) {
                 throw TooManyPaymentRequestsException(1)
             }
-
-            semaphore.acquire()
-            rateLimiter.tickSuspending()
+            if (!semaphore.tryAcquire()) {
+                throw TooManyPaymentRequestsException(1)
+            }
+            if (!rateLimiter.tick()) {
+                semaphore.release()
+                throw TooManyPaymentRequestsException(1)
+            }
 
             try {
                 val timeoutMillis = deadline - now() - 100

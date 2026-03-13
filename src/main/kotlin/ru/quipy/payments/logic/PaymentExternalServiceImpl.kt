@@ -114,7 +114,7 @@ class PaymentExternalSystemAdapterImpl(
             try {
                 val timeoutMillis = deadline - now() - 100
                 if (timeoutMillis <= 0) {
-                    throw TimeoutException("Payment deadline exceeded for $paymentId")
+                    throw TooManyPaymentRequestsException(1)
                 }
 
                 val responseBody = webClient.post()
@@ -151,17 +151,7 @@ class PaymentExternalSystemAdapterImpl(
                 when (e) {
                     is TimeoutException, is SocketTimeoutException -> {
                         timeoutCounter.increment()
-                        if (now() >= deadline) {
-                            logger.error(
-                                "[$accountName] Payment timed out for txId: $transactionId, payment: $paymentId, deadline exceeded",
-                                e
-                            )
-                            throw e
-                        }
-                        logger.error(
-                            "[$accountName] Payment timed out for txId: $transactionId, payment: $paymentId, retrying",
-                            e
-                        )
+                        throw TooManyPaymentRequestsException(1)
                     }
                     else -> {
                         logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)

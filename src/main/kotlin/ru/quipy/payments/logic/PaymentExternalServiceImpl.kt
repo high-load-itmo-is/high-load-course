@@ -15,6 +15,7 @@ import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
+import reactor.netty.resources.LoopResources
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
@@ -44,7 +45,10 @@ class PaymentExternalSystemAdapterImpl(
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
 
+        val httpLoopResources: LoopResources = LoopResources.create("payment-http-client", 64, true)
+
         val sharedHttpClient: HttpClient = HttpClient.create(connectionProvider)
+            .runOn(httpLoopResources)
             .protocol(HttpProtocol.H2C)
             .responseTimeout(Duration.ofMillis(120000))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)

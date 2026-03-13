@@ -96,7 +96,7 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
-    override suspend fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
         paymentScope.launch {

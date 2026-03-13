@@ -13,8 +13,6 @@ import java.util.*
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.server.ResponseStatusException
-import ru.quipy.common.utils.NamedThreadFactory
-import java.util.concurrent.Executors
 
 class TooManyPaymentRequestsException(
     private val retryAfterSeconds: Long
@@ -93,7 +91,14 @@ class APIController {
         } ?: throw IllegalArgumentException("No such order $orderId")
 
         val (createdAt, jobs) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-        jobs.forEach { job -> job.join() }
+        jobs.forEach { job ->
+            var completionError: Throwable? = null
+            job.invokeOnCompletion { cause ->
+                completionError = cause
+            }
+            job.join()
+            completionError?.let { throw it }
+        }
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

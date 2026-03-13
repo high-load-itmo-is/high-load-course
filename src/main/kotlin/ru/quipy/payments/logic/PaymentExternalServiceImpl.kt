@@ -15,6 +15,7 @@ import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
+import ru.quipy.apigateway.TooManyPaymentRequestsException
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.net.SocketTimeoutException
@@ -96,55 +97,80 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) : Job {
         val transactionId = UUID.randomUUID()
 
-        return paymentScope.launch {
-            executePaymentReactive(paymentId, amount, transactionId)
+        return paymentScope.async {
+            executePaymentReactive(paymentId, amount, transactionId, deadline)
         }
     }
 
-    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID) {
-        semaphore.acquire()
-        rateLimiter.tickSuspending()
+    private suspend fun executePaymentReactive(paymentId: UUID, amount: Int, transactionId: UUID, deadline: Long) {
+        while (true) {
+            if (now() + 500 > deadline) {
+                throw TooManyPaymentRequestsException(1)
+            }
 
-        try {
-            val responseBody = webClient.post()
-                .uri { uriBuilder ->
-                    uriBuilder.path("/external/process")
-                        .queryParam("serviceName", serviceName)
-                        .queryParam("token", token)
-                        .queryParam("accountName", accountName)
-                        .queryParam("transactionId", transactionId)
-                        .queryParam("paymentId", paymentId)
-                        .queryParam("amount", amount)
-                        .build()
-                }
-                .retrieve()
-                .bodyToMono<String>()
-                .doFinally {
-                    semaphore.release()
-                }
-                .awaitSingle()
+            semaphore.acquire()
+            rateLimiter.tickSuspending()
 
-            val body = try {
-                mapper.readValue(responseBody, ExternalSysResponse::class.java)
+            try {
+                val timeoutMillis = deadline - now()
+                if (timeoutMillis <= 0) {
+                    throw TimeoutException("Payment deadline exceeded for $paymentId")
+                }
+
+                val responseBody = webClient.post()
+                    .uri { uriBuilder ->
+                        uriBuilder.path("/external/process")
+                            .queryParam("serviceName", serviceName)
+                            .queryParam("token", token)
+                            .queryParam("accountName", accountName)
+                            .queryParam("transactionId", transactionId)
+                            .queryParam("paymentId", paymentId)
+                            .queryParam("amount", amount)
+                            .build()
+                    }
+                    .retrieve()
+                    .bodyToMono<String>()
+                    .timeout(Duration.ofMillis(timeoutMillis))
+                    .awaitSingle()
+
+                val body = try {
+                    mapper.readValue(responseBody, ExternalSysResponse::class.java)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
+                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                }
+
+                if (logger.isDebugEnabled) {
+                    logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
+                }
+                successCounter.increment()
+                return
+            } catch (e: TooManyRequests) {
+                logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
             } catch (e: Exception) {
-                logger.error("[$accountName] Failed to parse response for payment $paymentId: $responseBody")
-                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-            }
-
-            if (logger.isDebugEnabled) {
-                logger.debug("[$accountName] Payment processed for txId: $transactionId, succeeded: ${body.result}")
-            }
-            successCounter.increment()
-
-        } catch (e: TooManyRequests) {
-            logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
-            executePaymentReactive(paymentId, amount, transactionId)
-        } catch (e: Exception) {
-            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-            when (e) {
-                is TimeoutException, is SocketTimeoutException -> timeoutCounter.increment()
-                else -> errorCounter.increment()
+                when (e) {
+                    is TimeoutException, is SocketTimeoutException -> {
+                        timeoutCounter.increment()
+                        if (now() >= deadline) {
+                            logger.error(
+                                "[$accountName] Payment timed out for txId: $transactionId, payment: $paymentId, deadline exceeded",
+                                e
+                            )
+                            throw e
+                        }
+                        logger.error(
+                            "[$accountName] Payment timed out for txId: $transactionId, payment: $paymentId, retrying",
+                            e
+                        )
+                    }
+                    else -> {
+                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        errorCounter.increment()
+                        return
+                    }
+                }
+            } finally {
+                semaphore.release()
             }
         }
     }

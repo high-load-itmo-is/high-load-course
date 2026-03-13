@@ -17,9 +17,6 @@ import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
-import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
-import ru.quipy.payments.logic.OrderPayer.Companion
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -29,7 +26,6 @@ import java.util.concurrent.TimeoutException
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
     private val meterRegistry: MeterRegistry,
@@ -40,7 +36,7 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(3_000)
+            .maxConnections(100)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()

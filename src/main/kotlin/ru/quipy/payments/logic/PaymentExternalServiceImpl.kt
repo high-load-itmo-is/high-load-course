@@ -8,12 +8,15 @@ import kotlinx.coroutines.sync.Semaphore
 import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
+import io.netty.handler.timeout.ReadTimeoutException
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.WebClientRequestException
 import org.springframework.web.reactive.function.client.WebClientResponseException.TooManyRequests
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.netty.http.HttpProtocol
 import reactor.netty.http.client.HttpClient
+import reactor.netty.http.client.HttpClientRequest
 import reactor.netty.resources.ConnectionProvider
 import ru.quipy.apigateway.TooManyPaymentRequestsException
 import ru.quipy.common.utils.NamedThreadFactory
@@ -128,9 +131,13 @@ class PaymentExternalSystemAdapterImpl(
                             .queryParam("amount", amount)
                             .build()
                     }
+                    .httpRequest { request ->
+                        request
+                            .getNativeRequest<HttpClientRequest>()
+                            .responseTimeout(Duration.ofMillis(timeoutMillis))
+                    }
                     .retrieve()
                     .bodyToMono<String>()
-                    .timeout(Duration.ofMillis(timeoutMillis))
                     .awaitSingle()
 
                 val body = try {
@@ -149,9 +156,22 @@ class PaymentExternalSystemAdapterImpl(
                 logger.error("[$accountName] Payment failed for txId: $transactionId, with 429, retrying")
             } catch (e: Exception) {
                 when (e) {
-                    is TimeoutException, is SocketTimeoutException -> {
+                    is TimeoutException, is SocketTimeoutException, is ReadTimeoutException -> {
                         timeoutCounter.increment()
                         throw TooManyPaymentRequestsException(1)
+                    }
+                    is WebClientRequestException -> {
+                        if (
+                            e.cause is TimeoutException ||
+                            e.cause is SocketTimeoutException ||
+                            e.cause is ReadTimeoutException
+                        ) {
+                            timeoutCounter.increment()
+                            throw TooManyPaymentRequestsException(1)
+                        }
+                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        errorCounter.increment()
+                        return
                     }
                     else -> {
                         logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)

@@ -57,12 +57,14 @@ class PaymentAccountsConfig {
             .map { it.copy(enabled = true) }
             .onEach(::println)
             .map {
-                PaymentExternalSystemAdapterImpl(
+                val adapter = PaymentExternalSystemAdapterImpl(
                     it,
                     paymentProviderHostPort,
                     token,
                     meterRegistry,
                 )
+                adapter.preWarmConnection()
+                adapter
             }
     }
 }

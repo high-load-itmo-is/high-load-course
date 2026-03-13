@@ -97,6 +97,30 @@ class PaymentExternalSystemAdapterImpl(
         .clientConnector(ReactorClientHttpConnector(sharedHttpClient))
         .build()
 
+    fun preWarmConnection() {
+        val warmupTimeout = Duration.ofMillis(700)
+        try {
+            webClient.get()
+                .uri { uriBuilder ->
+                    uriBuilder.path("/external/accounts")
+                        .queryParam("serviceName", serviceName)
+                        .queryParam("token", token)
+                        .build()
+                }
+                .httpRequest { request ->
+                    request
+                        .getNativeRequest<HttpClientRequest>()
+                        .responseTimeout(warmupTimeout)
+                }
+                .retrieve()
+                .bodyToMono<String>()
+                .block(warmupTimeout.plusMillis(100))
+            logger.info("[$accountName] Pre-warmed external provider connection")
+        } catch (e: Exception) {
+            logger.warn("[$accountName] Failed to pre-warm connection, will establish on first request", e)
+        }
+    }
+
     override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) : Job {
         val transactionId = UUID.randomUUID()
 

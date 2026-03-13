@@ -92,8 +92,8 @@ class APIController {
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
 
-        val (createdAt, jobs) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-        jobs.forEach { job -> job.join() }
+        val (createdAt, _) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+//        jobs.forEach { job -> job.join() }
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

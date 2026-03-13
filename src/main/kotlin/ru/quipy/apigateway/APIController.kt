@@ -79,7 +79,7 @@ class APIController {
     )
 
     @PostMapping("/orders/{orderId}/payment")
-    suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
+    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         if (!rateLimiter.tick()) {
             throw TooManyPaymentRequestsException(15)
         }
@@ -91,14 +91,14 @@ class APIController {
         } ?: throw IllegalArgumentException("No such order $orderId")
 
         val (createdAt, jobs) = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-        jobs.forEach { job ->
-            var completionError: Throwable? = null
-            job.invokeOnCompletion { cause ->
-                completionError = cause
-            }
-            job.join()
-            completionError?.let { throw it }
-        }
+//        jobs.forEach { job ->
+//            var completionError: Throwable? = null
+//            job.invokeOnCompletion { cause ->
+//                completionError = cause
+//            }
+//            job.join()
+//            completionError?.let { throw it }
+//        }
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 

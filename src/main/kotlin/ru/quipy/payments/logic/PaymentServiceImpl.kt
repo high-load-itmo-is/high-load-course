@@ -21,7 +21,7 @@ class PaymentSystemImpl(
         val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
     }
 
-    override suspend fun submitPaymentRequest(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun submitPaymentRequest(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         for (account in paymentAccounts) {
             account.performPaymentAsync(orderId, paymentId, amount, paymentStartedAt, deadline)
         }

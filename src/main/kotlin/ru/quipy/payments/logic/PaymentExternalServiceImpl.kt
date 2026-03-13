@@ -112,7 +112,7 @@ class PaymentExternalSystemAdapterImpl(
             rateLimiter.tickSuspending()
 
             try {
-                val timeoutMillis = deadline - now()
+                val timeoutMillis = deadline - now() - 100
                 if (timeoutMillis <= 0) {
                     throw TimeoutException("Payment deadline exceeded for $paymentId")
                 }

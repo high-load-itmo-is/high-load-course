@@ -39,8 +39,10 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val mapper = ObjectMapper().registerKotlinModule()
 
+        private val maxConnections = 16
+        private val warmupConnections = 16
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
-            .maxConnections(16)
+            .maxConnections(maxConnections)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
             .maxIdleTime(Duration.ofSeconds(60))
             .build()
@@ -99,25 +101,35 @@ class PaymentExternalSystemAdapterImpl(
 
     fun preWarmConnection() {
         val warmupTimeout = Duration.ofMillis(700)
-        try {
-            webClient.get()
-                .uri { uriBuilder ->
-                    uriBuilder.path("/external/accounts")
-                        .queryParam("serviceName", serviceName)
-                        .queryParam("token", token)
-                        .build()
+        val jobs = LinkedList<Job>()
+        repeat(minOf(maxConnections, warmupConnections)) {
+            jobs.add(
+                paymentScope.launch {
+                    try {
+                        webClient.get()
+                            .uri { uriBuilder ->
+                                uriBuilder.path("/external/accounts")
+                                    .queryParam("serviceName", serviceName)
+                                    .queryParam("token", token)
+                                    .build()
+                            }
+                            .httpRequest { request ->
+                                request
+                                    .getNativeRequest<HttpClientRequest>()
+                                    .responseTimeout(warmupTimeout)
+                            }
+                            .retrieve()
+                            .bodyToMono<String>()
+                            .block(warmupTimeout.plusMillis(100))
+                        logger.info("[$accountName] Pre-warmed external provider connection")
+                    } catch (e: Exception) {
+                        logger.warn("[$accountName] Failed to pre-warm connection, will establish on first request", e)
+                    }
                 }
-                .httpRequest { request ->
-                    request
-                        .getNativeRequest<HttpClientRequest>()
-                        .responseTimeout(warmupTimeout)
-                }
-                .retrieve()
-                .bodyToMono<String>()
-                .block(warmupTimeout.plusMillis(100))
-            logger.info("[$accountName] Pre-warmed external provider connection")
-        } catch (e: Exception) {
-            logger.warn("[$accountName] Failed to pre-warm connection, will establish on first request", e)
+            )
+        }
+        runBlocking {
+            jobs.joinAll()
         }
     }
 

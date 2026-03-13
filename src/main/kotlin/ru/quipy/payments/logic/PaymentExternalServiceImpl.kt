@@ -40,7 +40,7 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         private val maxConnections = 16
-        private val warmupConnections = 16
+        private val warmupConnections = 1000
         val connectionProvider: ConnectionProvider = ConnectionProvider.builder("payment-provider")
             .maxConnections(maxConnections)
             .pendingAcquireTimeout(Duration.ofSeconds(120))
@@ -102,7 +102,7 @@ class PaymentExternalSystemAdapterImpl(
     fun preWarmConnection() {
         val warmupTimeout = Duration.ofMillis(700)
         val jobs = LinkedList<Job>()
-        repeat(minOf(maxConnections, warmupConnections)) {
+        repeat(warmupConnections) {
             jobs.add(
                 paymentScope.launch {
                     try {
@@ -120,10 +120,8 @@ class PaymentExternalSystemAdapterImpl(
                             }
                             .retrieve()
                             .bodyToMono<String>()
-                            .block(warmupTimeout.plusMillis(100))
-                        logger.info("[$accountName] Pre-warmed external provider connection")
+                            .awaitSingle()
                     } catch (e: Exception) {
-                        logger.warn("[$accountName] Failed to pre-warm connection, will establish on first request", e)
                     }
                 }
             )
@@ -131,6 +129,7 @@ class PaymentExternalSystemAdapterImpl(
         runBlocking {
             jobs.joinAll()
         }
+        logger.info("[$accountName] Pre-warmed external provider connection")
     }
 
     override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) : Job {

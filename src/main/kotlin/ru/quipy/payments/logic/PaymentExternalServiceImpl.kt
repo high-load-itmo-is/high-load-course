@@ -103,8 +103,10 @@ class PaymentExternalSystemAdapterImpl(
     override fun performPaymentAsync(orderId: UUID, paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val transactionId = UUID.randomUUID()
 
-        paymentScope.launch {
-            executePaymentReactive(paymentId, amount, transactionId)
+        for (i in 1..3) {
+            paymentScope.launch {
+                executePaymentReactive(paymentId, amount, transactionId)
+            }
         }
     }
 

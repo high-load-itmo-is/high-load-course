@@ -7,7 +7,7 @@ Content-Type: application/json
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
   "accounts": "acc-19",
-  "branch": "init_hw_12",
+  "branch": "hw-12-dispatch-5xx",
   "ratePerSecond": 100,
   "testCount": 50000,
   "processingTimeMillis": 10000000

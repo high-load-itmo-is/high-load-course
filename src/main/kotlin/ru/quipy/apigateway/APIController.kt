@@ -79,7 +79,7 @@ class APIController {
     }
 
     private val rateLimiter = SlidingWindowRateLimiter(
-        1100,
+        200,
         Duration.ofSeconds(1)
     )
 

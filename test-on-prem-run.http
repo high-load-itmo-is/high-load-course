@@ -6,11 +6,11 @@ Content-Type: application/json
 {
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
-  "accounts": "acc-13",
-  "branch": "clean_hw_10",
-  "ratePerSecond": 4000,
-  "testCount": 1500000,
-  "processingTimeMillis": 1000
+  "accounts": "acc-22",
+  "branch": "init_hw_11",
+  "ratePerSecond": 100,
+  "testCount": 20000,
+  "processingTimeMillis": 1500
 }
 
 ### Stop running test to save credits
